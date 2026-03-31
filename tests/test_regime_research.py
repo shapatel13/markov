@@ -7,6 +7,7 @@ import pandas as pd
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.config import ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig
 from markov_regime.data import normalize_symbol
+from markov_regime.data import _redact_api_key
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS
 from markov_regime.reporting import export_signal_report
 from markov_regime.strategy import (
@@ -46,6 +47,12 @@ def test_normalize_symbol_maps_common_crypto_aliases() -> None:
     assert normalize_symbol("BTC") == "BTCUSD"
     assert normalize_symbol("btc-usd") == "BTCUSD"
     assert normalize_symbol("SPY") == "SPY"
+
+
+def test_redact_api_key_hides_secret_in_source_url() -> None:
+    redacted = _redact_api_key("https://example.com/path?apikey=supersecret&symbol=BTCUSD")
+    assert "supersecret" not in redacted
+    assert "apikey=%2A%2A%2A" in redacted
 
 
 def test_generate_walk_forward_windows_respects_roll_stride() -> None:

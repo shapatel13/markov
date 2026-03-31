@@ -30,6 +30,8 @@ python -m pip install -e .[dev]
 FMP_API_KEY=your_key_here
 ```
 
+The loader prefers `.env` and will also fall back to `.env.example` for local testing, but `.env` is the safer place for a real key.
+
 3. Run the local app.
 
 ```powershell

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
 import requests
@@ -39,9 +41,13 @@ CRYPTO_ALIASES: dict[str, str] = {
 
 def load_api_key(explicit_key: str | None = None) -> str:
     load_dotenv()
+    if not os.getenv("FMP_API_KEY"):
+        example_path = Path(".env.example")
+        if example_path.exists():
+            load_dotenv(example_path, override=False)
     api_key = explicit_key or os.getenv("FMP_API_KEY")
     if not api_key:
-        raise ValueError("FMP_API_KEY is not set. Add it to .env or pass an explicit key.")
+        raise ValueError("FMP_API_KEY is not set. Add it to .env, .env.example, or pass an explicit key.")
     return api_key
 
 
@@ -98,6 +104,13 @@ def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
     return normalized
 
 
+def _redact_api_key(url: str) -> str:
+    parts = urlsplit(url)
+    query_items = parse_qsl(parts.query, keep_blank_values=True)
+    redacted_query = [(key, "***" if key.lower() == "apikey" else value) for key, value in query_items]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(redacted_query), parts.fragment))
+
+
 def fetch_price_data(
     config: DataConfig,
     api_key: str | None = None,
@@ -145,7 +158,7 @@ def fetch_price_data(
 
     return DataFetchResult(
         frame=frame,
-        source_url=response.url if response else candidate_urls[0],
+        source_url=_redact_api_key(response.url) if response else candidate_urls[0],
         requested_symbol=config.symbol,
         resolved_symbol=resolved_symbol,
     )

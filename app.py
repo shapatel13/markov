@@ -68,23 +68,24 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("Walk-forward HMM diagnostics with explicit guardrails, parameter sensitivity, and confidence intervals.")
+st.caption("BTC hourly preset with walk-forward HMM diagnostics, explicit guardrails, parameter sensitivity, and confidence intervals.")
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
+    st.caption("Default preset: BTC hourly with moderate rolling windows for local research.")
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["1hour", "1day"], index=0)
-    limit = st.number_input("Bars to fetch", min_value=600, max_value=10000, value=2500, step=100)
+    limit = st.number_input("Bars to fetch", min_value=600, max_value=10000, value=2000, step=100)
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6)
-    train_bars = st.number_input("Train bars", min_value=200, max_value=5000, value=750, step=50)
-    validate_bars = st.number_input("Validate bars", min_value=50, max_value=1500, value=180, step=10)
-    test_bars = st.number_input("Test bars", min_value=50, max_value=1500, value=180, step=10)
-    refit_stride = st.number_input("Refit stride", min_value=25, max_value=1500, value=180, step=5)
-    posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.65, step=0.01)
-    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=6)
-    cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=3)
+    train_bars = st.number_input("Train bars", min_value=200, max_value=5000, value=720, step=24)
+    validate_bars = st.number_input("Validate bars", min_value=50, max_value=1500, value=120, step=12)
+    test_bars = st.number_input("Test bars", min_value=50, max_value=1500, value=120, step=12)
+    refit_stride = st.number_input("Refit stride", min_value=25, max_value=1500, value=120, step=12)
+    posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01)
+    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=4)
+    cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4)
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2)
-    confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.05, step=0.01)
+    confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01)
     cost_bps = st.slider("Base transaction cost (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
@@ -144,6 +145,12 @@ if run_clicked:
                 "walk_config": walk_config,
                 "walk_adjusted": was_adjusted,
                 "available_rows": len(feature_frame),
+                "raw_rows": len(fetched.frame),
+                "feature_start": feature_frame["timestamp"].iloc[0],
+                "feature_end": feature_frame["timestamp"].iloc[-1],
+                "raw_start": fetched.frame["timestamp"].iloc[0],
+                "raw_end": fetched.frame["timestamp"].iloc[-1],
+                "latest_close": float(fetched.frame["close"].iloc[-1]),
             }
     except ValueError as exc:
         st.session_state.pop("analysis", None)
@@ -192,6 +199,24 @@ if analysis.get("walk_adjusted"):
         f"test={adjusted.test_bars}, stride={adjusted.refit_stride_bars} across "
         f"{analysis['available_rows']} usable rows."
     )
+
+data_columns = st.columns(5)
+data_items = [
+    ("Requested Symbol", analysis["symbol"]),
+    ("Resolved Symbol", analysis["resolved_symbol"]),
+    ("Fetched Rows", f"{analysis['raw_rows']}"),
+    ("Usable Rows", f"{analysis['available_rows']}"),
+    ("Latest Close", f"{analysis['latest_close']:,.2f}"),
+]
+for column, (label, value) in zip(data_columns, data_items, strict=True):
+    column.markdown(f"<div class='metric-card'><strong>{label}</strong><br><span style='font-size:1.15rem'>{value}</span></div>", unsafe_allow_html=True)
+st.caption(
+    "Data window: "
+    f"{pd.Timestamp(analysis['raw_start']).strftime('%Y-%m-%d %H:%M')} to "
+    f"{pd.Timestamp(analysis['raw_end']).strftime('%Y-%m-%d %H:%M')} raw bars | "
+    f"{pd.Timestamp(analysis['feature_start']).strftime('%Y-%m-%d %H:%M')} to "
+    f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
+)
 
 overview_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, notes_tab, export_tab = st.tabs(
     ["Overview", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Research Notes", "Exports"]
