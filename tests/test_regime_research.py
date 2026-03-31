@@ -11,6 +11,11 @@ from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepC
 from markov_regime.data import normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.interpretation import (
+    build_control_interpretation_rows,
+    build_metric_interpretation_rows,
+    build_trust_snapshot,
+)
 from markov_regime.research import (
     ResearchProgram,
     _candidate_grid,
@@ -274,6 +279,70 @@ def test_candidate_grid_prioritizes_4hour_then_1day_then_1hour() -> None:
     )
 
     assert [candidate[0] for candidate in grid] == ["4hour", "1day", "1hour"]
+
+
+def test_trust_snapshot_flags_thin_positive_run_as_fragile() -> None:
+    snapshot = build_trust_snapshot(
+        metrics={"sharpe": 2.5, "trades": 3.0},
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -1.2, "upper": 4.7}]),
+        state_stability=pd.DataFrame([{"canonical_state": 0, "stability_score": 0.9}]),
+        robustness=pd.DataFrame([{"symbol": "BTCUSD", "status": "ok", "sharpe": -0.4}]),
+        interval="4hour",
+        available_rows=513,
+        walk_adjusted=True,
+    )
+
+    assert snapshot["verdict"] == "Promising but fragile"
+    assert "bootstrap still crosses zero" in snapshot["summary"]
+
+
+def test_metric_interpretation_explains_held_position_vs_candidate() -> None:
+    rows = build_metric_interpretation_rows(
+        latest_row={
+            "signal_position": 1,
+            "candidate_action": 0,
+            "canonical_state": 3,
+            "guardrail_reason": "no_directional_edge",
+            "max_posterior": 0.99,
+            "confidence_gap": 0.18,
+        },
+        metrics={"sharpe": 1.4, "annualized_return": 0.42, "confidence_coverage": 0.53, "trades": 3.0},
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -3.0, "upper": 4.0}]),
+        state_stability=pd.DataFrame([{"canonical_state": 0, "stability_score": 1.0}]),
+        robustness=pd.DataFrame([{"symbol": "BTCUSD", "status": "ok", "sharpe": -0.2}]),
+        interval="4hour",
+        available_rows=513,
+        walk_adjusted=True,
+    )
+    lookup = rows.set_index("metric")
+
+    assert lookup.loc["Held Position", "value"] == "Long"
+    assert lookup.loc["Latest Candidate", "value"] == "Flat"
+    assert "older position may still be held" in lookup.loc["Guardrail Status", "interpretation"]
+
+
+def test_control_interpretation_describes_cautious_filters() -> None:
+    rows = build_control_interpretation_rows(
+        interval="4hour",
+        feature_pack="regime_mix",
+        walk_config=WalkForwardConfig(train_bars=420, purge_bars=2, validate_bars=84, embargo_bars=2, test_bars=84, refit_stride_bars=84),
+        strategy_config=StrategyConfig(
+            posterior_threshold=0.7,
+            min_hold_bars=12,
+            cooldown_bars=4,
+            required_confirmations=3,
+            confidence_gap=0.08,
+            cost_bps=2.0,
+            spread_bps=4.0,
+            slippage_bps=3.0,
+            impact_bps=2.0,
+        ),
+    )
+    lookup = rows.set_index("control")
+
+    assert "balanced" in lookup.loc["Posterior Threshold", "interpretation"].lower()
+    assert "sticky" in lookup.loc["Min Hold", "interpretation"].lower()
+    assert "anti-whipsaw" in lookup.loc["Cooldown", "interpretation"].lower()
 
 
 def test_ensure_results_tsv_writes_header(tmp_path: Path) -> None:

@@ -15,6 +15,13 @@ from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepC
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.interpretation import (
+    CONTROL_HELP,
+    build_control_interpretation_rows,
+    build_metric_interpretation_rows,
+    build_trust_snapshot,
+    first_sentence,
+)
 from markov_regime.research import run_feature_pack_comparison, run_timeframe_comparison
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
@@ -80,26 +87,26 @@ with st.sidebar.form("controls"):
     st.subheader("Research Controls")
     st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
-    interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0)
+    interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
     default_walk = default_walk_forward_config(interval)
-    feature_pack = st.selectbox("Feature pack", options=list(list_feature_packs()), index=0)
-    limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100)
-    selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6)
-    train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12)
-    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=default_walk.purge_bars, step=1)
-    validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, value=default_walk.validate_bars, step=12)
-    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=default_walk.embargo_bars, step=1)
-    test_bars = st.number_input("Test bars", min_value=24, max_value=1500, value=default_walk.test_bars, step=12)
-    refit_stride = st.number_input("Refit stride", min_value=24, max_value=1500, value=default_walk.refit_stride_bars, step=12)
-    posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01)
-    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=6)
-    cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4)
-    required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2)
-    confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01)
-    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5)
-    spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5)
-    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5)
-    impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5)
+    feature_pack = st.selectbox("Feature pack", options=list(list_feature_packs()), index=0, help=CONTROL_HELP["feature_pack"])
+    limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100, help=CONTROL_HELP["limit"])
+    selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6, help=CONTROL_HELP["states"])
+    train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12, help=CONTROL_HELP["train_bars"])
+    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=default_walk.purge_bars, step=1, help=CONTROL_HELP["purge_bars"])
+    validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, value=default_walk.validate_bars, step=12, help=CONTROL_HELP["validate_bars"])
+    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=default_walk.embargo_bars, step=1, help=CONTROL_HELP["embargo_bars"])
+    test_bars = st.number_input("Test bars", min_value=24, max_value=1500, value=default_walk.test_bars, step=12, help=CONTROL_HELP["test_bars"])
+    refit_stride = st.number_input("Refit stride", min_value=24, max_value=1500, value=default_walk.refit_stride_bars, step=12, help=CONTROL_HELP["refit_stride"])
+    posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01, help=CONTROL_HELP["posterior_threshold"])
+    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=6, help=CONTROL_HELP["min_hold_bars"])
+    cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4, help=CONTROL_HELP["cooldown_bars"])
+    required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
+    confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
+    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
+    spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
+    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
+    impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5, help=CONTROL_HELP["impact_bps"])
     robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
     run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
     run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
@@ -261,22 +268,63 @@ timeframe_comparison = analysis["timeframe_comparison"]
 feature_pack_comparison = analysis["feature_pack_comparison"]
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
+guardrail_text = latest_row["guardrail_reason"] or "accepted"
+metric_interpretation = build_metric_interpretation_rows(
+    latest_row=latest_row.to_dict(),
+    metrics=selected_result.metrics,
+    bootstrap=selected_result.bootstrap,
+    state_stability=selected_result.state_stability,
+    robustness=robustness,
+    interval=analysis["interval"],
+    available_rows=analysis["available_rows"],
+    walk_adjusted=analysis["walk_adjusted"],
+)
+control_interpretation = build_control_interpretation_rows(
+    interval=analysis["interval"],
+    feature_pack=analysis["feature_pack"],
+    walk_config=analysis["walk_config"],
+    strategy_config=analysis["strategy_config"],
+)
+trust_snapshot = build_trust_snapshot(
+    metrics=selected_result.metrics,
+    bootstrap=selected_result.bootstrap,
+    state_stability=selected_result.state_stability,
+    robustness=robustness,
+    interval=analysis["interval"],
+    available_rows=analysis["available_rows"],
+    walk_adjusted=analysis["walk_adjusted"],
+)
+metric_lookup = metric_interpretation.set_index("metric")
 
-signal_text = {1: "Long", 0: "Flat", -1: "Short"}.get(int(latest_row["signal_position"]), "Flat")
-guardrail_text = latest_row["guardrail_reason"] or "Signal accepted"
-
-metrics_columns = st.columns(5)
+metrics_columns = st.columns(6)
 metric_items = [
-    ("Current State", f"{int(latest_row['canonical_state'])}"),
-    ("Signal", signal_text),
-    ("Posterior", f"{latest_row['max_posterior']:.2f}"),
-    ("Sharpe", f"{selected_result.metrics['sharpe']:.2f}"),
-    ("Ann. Return", f"{selected_result.metrics['annualized_return']:.1%}"),
+    ("Current State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
+    ("Held Position", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),
+    ("Latest Candidate", str(metric_lookup.loc["Latest Candidate", "value"]), first_sentence(str(metric_lookup.loc["Latest Candidate", "interpretation"]))),
+    ("Posterior", str(metric_lookup.loc["Posterior", "value"]), first_sentence(str(metric_lookup.loc["Posterior", "interpretation"]))),
+    ("Sharpe", str(metric_lookup.loc["Sharpe", "value"]), first_sentence(str(metric_lookup.loc["Sharpe", "interpretation"]))),
+    ("Ann. Return", str(metric_lookup.loc["Annualized Return", "value"]), first_sentence(str(metric_lookup.loc["Annualized Return", "interpretation"]))),
 ]
-for column, (label, value) in zip(metrics_columns, metric_items, strict=True):
-    column.markdown(f"<div class='metric-card'><strong>{label}</strong><br><span style='font-size:1.4rem'>{value}</span></div>", unsafe_allow_html=True)
+for column, (label, value, note) in zip(metrics_columns, metric_items, strict=True):
+    column.markdown(
+        (
+            "<div class='metric-card'>"
+            f"<strong>{label}</strong><br><span style='font-size:1.35rem'>{value}</span>"
+            f"<br><span style='font-size:0.82rem;color:#475569'>{note}</span></div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
-st.caption(f"Latest guardrail decision: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+trust_message = trust_snapshot["summary"]
+if trust_snapshot["severity"] == "success":
+    st.success(trust_message)
+elif trust_snapshot["severity"] == "error":
+    st.error(trust_message)
+else:
+    st.warning(trust_message)
+
+st.caption("Held Position shows the active book. Latest Candidate shows what the newest bar alone supports before hold and cooldown mechanics are applied.")
+st.caption(f"Latest guardrail status: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
 st.caption(f"Feature pack: `{analysis['feature_pack']}`")
 if analysis.get("resolved_symbol") and analysis["resolved_symbol"] != analysis["symbol"]:
     st.info(
@@ -316,8 +364,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, interpretation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Interpretation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -345,6 +393,14 @@ with feature_tab:
     st.plotly_chart(plot_feature_pack_comparison(feature_pack_comparison), use_container_width=True)
     st.dataframe(feature_pack_comparison, use_container_width=True)
     st.caption("Feature-pack ablation holds the timeframe and strategy controls fixed while changing what the HMM sees. This is the cleanest way to tell whether signal improvements are coming from better market representation or just tighter filters.")
+
+with interpretation_tab:
+    st.subheader("Current Run Readout")
+    st.dataframe(metric_interpretation, use_container_width=True, hide_index=True)
+    st.caption("These explanations interpret the latest bar and the current backtest in plain English. They are heuristics for readability, not hard statistical proof.")
+    st.subheader("Current Control Meanings")
+    st.dataframe(control_interpretation, use_container_width=True, hide_index=True)
+    st.caption("These rows explain what the current settings are encouraging the strategy to do, so you can tell whether results are coming from signal quality or just stricter filters.")
 
 with model_tab:
     st.plotly_chart(plot_model_comparison(comparison), use_container_width=True)
