@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Iterable
 
 import pandas as pd
 
-from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, WalkForwardConfig
+from markov_regime.confirmation import apply_higher_timeframe_confirmation
+from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
@@ -48,6 +50,30 @@ def run_multi_asset_robustness(
                 walk_config=effective_walk_config,
                 strategy_config=strategy_config,
             )
+            if interval == "4hour" and strategy_config.require_daily_confirmation:
+                confirmation_fetched = fetch_price_data(DataConfig(symbol=symbol, interval="1day", limit=limit))
+                confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
+                requested_confirmation_walk = default_walk_forward_config("1day")
+                confirmation_walk_config, _ = (
+                    suggest_walk_forward_config(len(confirmation_features), requested_confirmation_walk)
+                    if auto_adjust_windows
+                    else (requested_confirmation_walk, False)
+                )
+                confirmation_result = run_walk_forward(
+                    feature_frame=confirmation_features,
+                    feature_columns=feature_columns,
+                    interval="1day",
+                    model_config=model_config,
+                    walk_config=confirmation_walk_config,
+                    strategy_config=replace(strategy_config, require_daily_confirmation=False),
+                )
+                result = apply_higher_timeframe_confirmation(
+                    result,
+                    confirmation_result,
+                    interval=interval,
+                    strategy_config=strategy_config,
+                    confirmation_interval="1day",
+                )
             rows.append(
                 {
                     "symbol": symbol,

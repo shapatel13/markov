@@ -9,6 +9,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
 - Compares 5 through 9 HMM states side by side.
 - Compares `4hour`, `1day`, and `1hour` operating modes so higher-timeframe trades can be judged against both the slower swing lane and the noisier intraday baseline.
+- Supports an optional `4hour` execution filter that only blocks trades when the daily lane clearly disagrees, while allowing neutral daily bars to pass through without adding conviction.
 - Aligns states across retrains and reports stability diagnostics.
 - Sweeps posterior threshold, minimum hold, cooldown, and required confirmations.
 - Reports block-bootstrap confidence intervals and transaction cost stress tests.
@@ -69,6 +70,12 @@ Compare `4hour`, `1day`, and `1hour`:
 python -m markov_regime compare-timeframes --symbol BTCUSD --states 6
 ```
 
+Backtest `4hour` with daily confirmation turned on:
+
+```powershell
+python -m markov_regime backtest --symbol BTCUSD --interval 4hour --feature-pack regime_mix --require-daily-confirmation
+```
+
 Compare feature packs on the same timeframe:
 
 ```powershell
@@ -104,6 +111,7 @@ python -m streamlit run app.py
 
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
+- The optional daily confirmation filter acts as an execution veto, not a second alpha model. Daily neutrality is allowed; clear daily opposition blocks the `4hour` trade.
 - State labels are re-aligned after every refit because raw HMM state IDs are not stable.
 - Directional actions come from validation-window forward returns, not the in-sample training fit.
 - The strategy prefers flat exposure when posterior confidence is marginal or when validation support is weak.
@@ -151,3 +159,4 @@ python -m streamlit run app.py
 - A conservative flat signal is a feature, not a bug: low-confidence bars are intentionally filtered instead of forced into trades.
 - Multi-asset robustness helps, but three or four liquid coins still do not guarantee the signal generalizes across regimes or venues.
 - The autoresearch score is a ranking heuristic for candidate selection, not an economic truth; human review should still approve any change promoted to the main app defaults.
+- Daily confirmation can reduce trade count sharply if the daily lane is weak or chronically flat, so always read it together with coverage and trade-count diagnostics.

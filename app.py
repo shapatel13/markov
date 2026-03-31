@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,7 @@ if str(SRC_PATH) not in sys.path:
 
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
@@ -40,7 +42,7 @@ from markov_regime.ui import (
     plot_state_stability,
     plot_timeframe_comparison,
 )
-from markov_regime.walkforward import compare_state_counts
+from markov_regime.walkforward import compare_state_counts, summarize_state_count_results
 from markov_regime.walkforward import suggest_walk_forward_config
 
 st.set_page_config(page_title="Markov Regime Research", layout="wide")
@@ -103,6 +105,7 @@ with st.sidebar.form("controls"):
     cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4, help=CONTROL_HELP["cooldown_bars"])
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
+    require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
     cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
     slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
@@ -133,11 +136,14 @@ if run_clicked:
                 cooldown_bars=int(cooldown_bars),
                 required_confirmations=int(required_confirmations),
                 confidence_gap=confidence_gap,
+                require_daily_confirmation=require_daily_confirmation,
                 cost_bps=cost_bps,
                 spread_bps=spread_bps,
                 slippage_bps=slippage_bps,
                 impact_bps=impact_bps,
             )
+            execution_strategy_config = strategy_config
+            model_strategy_config = replace(strategy_config, require_daily_confirmation=False)
             fetched = fetch_price_data(data_config)
             feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
             walk_config, was_adjusted = (
@@ -151,13 +157,44 @@ if run_clicked:
                 interval=data_config.interval,
                 model_config=model_config,
                 walk_config=walk_config,
-                strategy_config=strategy_config,
+                strategy_config=model_strategy_config,
             )
+            confirmation_fetched = None
+            confirmation_result = None
+            if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
+                confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=int(limit))
+                confirmation_fetched = fetch_price_data(confirmation_data_config)
+                confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
+                confirmation_walk_config, _ = (
+                    suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day"))
+                    if auto_adjust_windows
+                    else (default_walk_forward_config("1day"), False)
+                )
+                _, confirmation_results_by_state = compare_state_counts(
+                    feature_frame=confirmation_feature_frame,
+                    feature_columns=feature_columns,
+                    interval="1day",
+                    model_config=model_config,
+                    walk_config=confirmation_walk_config,
+                    strategy_config=model_strategy_config,
+                )
+                results_by_state = {
+                    n_states: apply_higher_timeframe_confirmation(
+                        result,
+                        confirmation_results_by_state[n_states],
+                        interval=data_config.interval,
+                        strategy_config=execution_strategy_config,
+                        confirmation_interval="1day",
+                    )
+                    for n_states, result in results_by_state.items()
+                }
+                comparison = summarize_state_count_results(results_by_state)
+                confirmation_result = confirmation_results_by_state[selected_states]
             selected_result = results_by_state[selected_states]
             sweep_results = parameter_sweep(
                 predictions=selected_result.predictions,
                 n_states=selected_states,
-                base_config=strategy_config,
+                base_config=execution_strategy_config,
                 sweep_config=SweepConfig(),
                 interval=data_config.interval,
             )
@@ -168,7 +205,7 @@ if run_clicked:
                 feature_columns=feature_columns,
                 model_config=model_config,
                 walk_config=walk_config,
-                strategy_config=strategy_config,
+                strategy_config=execution_strategy_config,
                 auto_adjust_windows=auto_adjust_windows,
             )
             timeframe_comparison = (
@@ -176,7 +213,7 @@ if run_clicked:
                     symbol=symbol,
                     limit=int(limit),
                     model_config=model_config,
-                    strategy_config=strategy_config,
+                    strategy_config=execution_strategy_config,
                     feature_pack=feature_pack,
                     feature_columns=feature_columns,
                     auto_adjust_windows=auto_adjust_windows,
@@ -189,7 +226,9 @@ if run_clicked:
                     price_frame=fetched.frame,
                     interval=data_config.interval,
                     model_config=model_config,
-                    strategy_config=strategy_config,
+                    strategy_config=execution_strategy_config,
+                    symbol=symbol,
+                    limit=int(limit),
                     auto_adjust_windows=auto_adjust_windows,
                 )
                 if run_feature_pack_check
@@ -224,6 +263,10 @@ if run_clicked:
                 "robustness": robustness,
                 "timeframe_comparison": timeframe_comparison,
                 "feature_pack_comparison": feature_pack_comparison,
+                "confirmation_enabled": bool(data_config.interval == "4hour" and strategy_config.require_daily_confirmation),
+                "confirmation_summary": selected_result.confirmation_summary,
+                "confirmation_result": confirmation_result,
+                "confirmation_data_url": confirmation_fetched.source_url if confirmation_fetched is not None else "",
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
@@ -232,7 +275,7 @@ if run_clicked:
                 "model_config": model_config,
                 "feature_pack": feature_pack,
                 "feature_columns": feature_columns,
-                "strategy_config": strategy_config,
+                "strategy_config": execution_strategy_config,
                 "walk_config": walk_config,
                 "walk_adjusted": was_adjusted,
                 "available_rows": len(feature_frame),
@@ -296,15 +339,23 @@ trust_snapshot = build_trust_snapshot(
 )
 metric_lookup = metric_interpretation.set_index("metric")
 
-metrics_columns = st.columns(6)
 metric_items = [
     ("Current State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
     ("Held Position", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),
     ("Latest Candidate", str(metric_lookup.loc["Latest Candidate", "value"]), first_sentence(str(metric_lookup.loc["Latest Candidate", "interpretation"]))),
+]
+if "Daily Confirmation" in metric_lookup.index:
+    metric_items.append(
+        ("Daily Confirmation", str(metric_lookup.loc["Daily Confirmation", "value"]), first_sentence(str(metric_lookup.loc["Daily Confirmation", "interpretation"])))
+    )
+metric_items.extend(
+    [
     ("Posterior", str(metric_lookup.loc["Posterior", "value"]), first_sentence(str(metric_lookup.loc["Posterior", "interpretation"]))),
     ("Sharpe", str(metric_lookup.loc["Sharpe", "value"]), first_sentence(str(metric_lookup.loc["Sharpe", "interpretation"]))),
     ("Ann. Return", str(metric_lookup.loc["Annualized Return", "value"]), first_sentence(str(metric_lookup.loc["Annualized Return", "interpretation"]))),
-]
+    ]
+)
+metrics_columns = st.columns(len(metric_items))
 for column, (label, value, note) in zip(metrics_columns, metric_items, strict=True):
     column.markdown(
         (
@@ -324,7 +375,11 @@ else:
     st.warning(trust_message)
 
 st.caption("Held Position shows the active book. Latest Candidate shows what the newest bar alone supports before hold and cooldown mechanics are applied.")
+if analysis["confirmation_enabled"]:
+    st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
 st.caption(f"Latest guardrail status: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
+    st.caption(f"Daily confirmation source: `{analysis['confirmation_data_url']}`")
 st.caption(f"Feature pack: `{analysis['feature_pack']}`")
 if analysis.get("resolved_symbol") and analysis["resolved_symbol"] != analysis["symbol"]:
     st.info(
@@ -364,8 +419,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, interpretation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Interpretation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, interpretation_tab, confirmation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Interpretation", "Confirmation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -401,6 +456,26 @@ with interpretation_tab:
     st.subheader("Current Control Meanings")
     st.dataframe(control_interpretation, use_container_width=True, hide_index=True)
     st.caption("These rows explain what the current settings are encouraging the strategy to do, so you can tell whether results are coming from signal quality or just stricter filters.")
+
+with confirmation_tab:
+    if analysis["confirmation_enabled"]:
+        st.subheader("4H + 1D Agreement")
+        st.dataframe(analysis["confirmation_summary"], use_container_width=True, hide_index=True)
+        confirmation_columns = [
+            "timestamp",
+            "base_signal_position",
+            "signal_position",
+            "base_candidate_action",
+            "candidate_action",
+            "confirmation_effective_direction",
+            "confirmation_status",
+            "guardrail_reason",
+        ]
+        available_columns = [column for column in confirmation_columns if column in selected_result.predictions.columns]
+        st.dataframe(selected_result.predictions.loc[:, available_columns].tail(50), use_container_width=True)
+        st.caption("`base_*` columns show the raw 4H proposal before the daily filter. The plain `signal_position` and `candidate_action` columns show the executed result after daily confirmation is applied.")
+    else:
+        st.info("Daily confirmation is currently off. Enable `Require daily confirmation for 4H trades` to make the daily lane confirm or veto the 4H execution.")
 
 with model_tab:
     st.plotly_chart(plot_model_comparison(comparison), use_container_width=True)

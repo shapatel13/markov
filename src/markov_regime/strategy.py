@@ -283,6 +283,10 @@ def replay_strategy(
         replayed = attach_state_action_columns(replayed, state_actions, n_states)
         replay_frames.append(replayed)
     combined = pd.concat(replay_frames).sort_values("timestamp").reset_index(drop=True)
+    if config.require_daily_confirmation and "confirmation_effective_direction" in combined.columns:
+        from markov_regime.confirmation import apply_confirmation_overlay
+
+        combined, _ = apply_confirmation_overlay(combined, config)
     return combined, compute_metrics(combined, interval)
 
 

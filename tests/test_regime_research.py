@@ -7,6 +7,7 @@ import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
 from markov_regime.data import normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
@@ -147,6 +148,84 @@ def test_guardrail_keeps_strategy_flat_when_posterior_is_low() -> None:
 
     assert result["signal_position"].eq(0).all()
     assert set(result["guardrail_reason"]) == {"posterior_below_threshold"}
+
+
+def test_daily_confirmation_overlay_blocks_opposing_exposure() -> None:
+    frame = _signal_input_frame([0.8, 0.8, 0.8])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["confirmation_source_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="D")
+    frame["confirmation_effective_direction"] = [-1, -1, -1]
+    frame["confirmation_signal_position"] = [-1, -1, -1]
+    frame["confirmation_candidate_action"] = [-1, -1, -1]
+    frame["confirmation_guardrail_reason"] = ["accepted", "accepted", "accepted"]
+
+    filtered, summary = apply_confirmation_overlay(frame, StrategyConfig(require_daily_confirmation=True))
+
+    assert filtered["signal_position"].eq(0).all()
+    assert filtered["candidate_action"].eq(0).all()
+    assert set(filtered["guardrail_reason"]) == {"daily_confirmation_opposes"}
+    assert "blocked" in set(summary["confirmation_status"])
+
+
+def test_daily_confirmation_overlay_allows_neutral_exposure() -> None:
+    frame = _signal_input_frame([0.8, 0.8, 0.8])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["confirmation_source_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="D")
+    frame["confirmation_effective_direction"] = [0, 0, 0]
+    frame["confirmation_signal_position"] = [0, 0, 0]
+    frame["confirmation_candidate_action"] = [0, 0, 0]
+    frame["confirmation_guardrail_reason"] = ["accepted", "accepted", "accepted"]
+
+    filtered, _ = apply_confirmation_overlay(frame, StrategyConfig(require_daily_confirmation=True))
+
+    assert filtered["signal_position"].tolist() == [0, 1, 1]
+    assert filtered["candidate_action"].tolist() == [1, 1, 1]
+
+
+def test_align_confirmation_predictions_uses_latest_daily_bar() -> None:
+    primary = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2025-01-02 04:00:00", "2025-01-02 08:00:00"]),
+            "signal_position": [1, 1],
+            "candidate_action": [1, 1],
+            "guardrail_reason": ["", ""],
+            "max_posterior": [0.8, 0.8],
+            "confidence_gap": [0.2, 0.2],
+        }
+    )
+    confirmation = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2025-01-01 00:00:00", "2025-01-02 00:00:00"]),
+            "signal_position": [0, 1],
+            "candidate_action": [0, 1],
+            "guardrail_reason": ["", ""],
+            "max_posterior": [0.6, 0.9],
+            "confidence_gap": [0.1, 0.2],
+        }
+    )
+
+    aligned = align_confirmation_predictions(primary, confirmation, "1day")
+
+    assert aligned["confirmation_interval"].eq("1day").all()
+    assert aligned["confirmation_effective_direction"].tolist() == [1, 1]
 
 
 def test_confirmations_and_min_hold_delay_entry_and_exit() -> None:

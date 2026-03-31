@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from markov_regime.config import (
     default_walk_forward_config,
 )
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import DataFetchResult, fetch_price_data
 from markov_regime.features import FEATURE_COLUMNS, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.research_notes import build_research_notes
@@ -208,6 +209,47 @@ def _resolve_walk_config(
     return suggest_walk_forward_config(len(feature_frame), requested)
 
 
+def _maybe_apply_daily_confirmation(
+    *,
+    result,
+    symbol: str,
+    limit: int,
+    feature_columns: tuple[str, ...],
+    model_config: ModelConfig,
+    strategy_config: StrategyConfig,
+    auto_adjust_windows: bool,
+    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+    interval: Interval,
+):
+    if interval != "4hour" or not strategy_config.require_daily_confirmation:
+        return result
+
+    confirmation_strategy_config = replace(strategy_config, require_daily_confirmation=False)
+    _, confirmation_features = _fetch_feature_context(
+        symbol=symbol,
+        interval="1day",
+        feature_columns=feature_columns,
+        limit=limit,
+        cache=cache,
+    )
+    confirmation_walk_config, _ = _resolve_walk_config(confirmation_features, "1day", auto_adjust_windows)
+    confirmation_result = run_walk_forward(
+        feature_frame=confirmation_features,
+        feature_columns=feature_columns,
+        interval="1day",
+        model_config=model_config,
+        walk_config=confirmation_walk_config,
+        strategy_config=confirmation_strategy_config,
+    )
+    return apply_higher_timeframe_confirmation(
+        result,
+        confirmation_result,
+        interval=interval,
+        strategy_config=strategy_config,
+        confirmation_interval="1day",
+    )
+
+
 def _bootstrap_interval(result, metric: str) -> tuple[float, float]:
     row = result.bootstrap.loc[result.bootstrap["metric"] == metric]
     if row.empty:
@@ -360,6 +402,17 @@ def run_timeframe_comparison(
                 walk_config=walk_config,
                 strategy_config=strategy_config,
             )
+            result = _maybe_apply_daily_confirmation(
+                result=result,
+                symbol=symbol,
+                limit=limit,
+                feature_columns=feature_columns,
+                model_config=model_config,
+                strategy_config=strategy_config,
+                auto_adjust_windows=auto_adjust_windows,
+                cache=cache,
+                interval=interval,
+            )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             rows.append(
                 {
@@ -410,11 +463,14 @@ def run_feature_pack_comparison(
     interval: Interval,
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
+    symbol: str | None = None,
+    limit: int | None = None,
     feature_packs: tuple[str, ...] | None = None,
     auto_adjust_windows: bool = True,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     selected_packs = feature_packs or list_feature_packs()
+    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
 
     for feature_pack in selected_packs:
         feature_columns = get_feature_columns(feature_pack)
@@ -429,6 +485,18 @@ def run_feature_pack_comparison(
                 walk_config=walk_config,
                 strategy_config=strategy_config,
             )
+            if symbol is not None and limit is not None:
+                result = _maybe_apply_daily_confirmation(
+                    result=result,
+                    symbol=symbol,
+                    limit=limit,
+                    feature_columns=feature_columns,
+                    model_config=model_config,
+                    strategy_config=strategy_config,
+                    auto_adjust_windows=auto_adjust_windows,
+                    cache=cache,
+                    interval=interval,
+                )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             consistency = _fold_consistency_metrics(result)
             rows.append(

@@ -41,6 +41,7 @@ class StrategyConfig:
     cooldown_bars: int = 3
     required_confirmations: int = 2
     confidence_gap: float = 0.05
+    require_daily_confirmation: bool = False
     min_validation_edge: float = 0.0
     min_validation_samples: int = 20
     signal_horizon: int = 6

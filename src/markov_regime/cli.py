@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 
+from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.config import (
     DataConfig,
     ModelConfig,
@@ -56,6 +58,7 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cooldown-bars", type=int, default=3)
     parser.add_argument("--required-confirmations", type=int, default=2)
     parser.add_argument("--confidence-gap", type=float, default=0.05)
+    parser.add_argument("--require-daily-confirmation", action="store_true", help="Only execute 4H exposure when the daily lane agrees.")
     parser.add_argument("--cost-bps", type=float, default=2.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
     parser.add_argument("--slippage-bps", type=float, default=3.0)
@@ -74,6 +77,7 @@ def _load_result(args: argparse.Namespace):
         cooldown_bars=args.cooldown_bars,
         required_confirmations=args.required_confirmations,
         confidence_gap=args.confidence_gap,
+        require_daily_confirmation=args.require_daily_confirmation,
         cost_bps=args.cost_bps,
         spread_bps=args.spread_bps,
         slippage_bps=args.slippage_bps,
@@ -93,8 +97,32 @@ def _load_result(args: argparse.Namespace):
         interval=data_config.interval,
         model_config=model_config,
         walk_config=effective_walk_config,
-        strategy_config=strategy_config,
+        strategy_config=replace(strategy_config, require_daily_confirmation=False),
     )
+    if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
+        confirmation_config = DataConfig(symbol=args.symbol, interval="1day", limit=args.limit)
+        confirmation_fetched = fetch_price_data(confirmation_config)
+        confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
+        confirmation_walk_config = (
+            default_walk_forward_config("1day")
+            if args.strict_windows
+            else suggest_walk_forward_config(len(confirmation_features), default_walk_forward_config("1day"))[0]
+        )
+        confirmation_result = run_walk_forward(
+            feature_frame=confirmation_features,
+            feature_columns=feature_columns,
+            interval="1day",
+            model_config=model_config,
+            walk_config=confirmation_walk_config,
+            strategy_config=replace(strategy_config, require_daily_confirmation=False),
+        )
+        result = apply_higher_timeframe_confirmation(
+            result,
+            confirmation_result,
+            interval=data_config.interval,
+            strategy_config=strategy_config,
+            confirmation_interval="1day",
+        )
     return data_config, model_config, feature_columns, strategy_config, effective_walk_config, result
 
 
@@ -178,6 +206,8 @@ def main() -> None:
             interval=data_config.interval,
             model_config=model_config,
             strategy_config=strategy_config,
+            symbol=data_config.symbol,
+            limit=data_config.limit,
             auto_adjust_windows=not args.strict_windows,
         )
         print(feature_results.to_string(index=False))

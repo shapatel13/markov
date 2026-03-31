@@ -88,6 +88,8 @@ def write_run_artifact_bundle(
     files["bootstrap_csv"] = _write_table(selected_result.bootstrap, root / "bootstrap.csv")
     files["forward_returns_csv"] = _write_table(selected_result.forward_returns, root / "forward_returns.csv")
     files["guardrails_csv"] = _write_table(selected_result.guardrail_summary, root / "guardrails.csv")
+    if selected_result.confirmation_summary is not None and not selected_result.confirmation_summary.empty:
+        files["confirmation_summary_csv"] = _write_table(selected_result.confirmation_summary, root / "confirmation_summary.csv")
     files["sweep_results_csv"] = _write_table(sweep_results, root / "sweep_results.csv")
     files["robustness_csv"] = _write_table(robustness, root / "robustness.csv")
     if timeframe_comparison is not None and not timeframe_comparison.empty:

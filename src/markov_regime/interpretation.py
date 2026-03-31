@@ -24,6 +24,7 @@ CONTROL_HELP: dict[str, str] = {
     "cooldown_bars": "Bars to stay flat after a position closes. Higher values reduce whipsaws but may miss quick re-entries.",
     "required_confirmations": "Consecutive qualifying bars required before a new position can open. Higher values are stricter.",
     "confidence_gap": "Minimum gap between the top two posterior state probabilities. Higher values force cleaner separation between competing regimes.",
+    "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
     "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
@@ -244,6 +245,22 @@ def build_metric_interpretation_rows(
     stability = snapshot["stability_score"]
     robustness_median = snapshot["robustness_median_sharpe"]
     sample_band = snapshot["sample_band"]
+    confirmation_status = str(latest_row.get("confirmation_status", "") or "")
+    confirmation_direction = int(latest_row.get("confirmation_effective_direction", 0)) if "confirmation_effective_direction" in latest_row else 0
+    confirmation_interval = str(latest_row.get("confirmation_interval", "")) if "confirmation_interval" in latest_row else ""
+
+    if confirmation_status == "confirmed":
+        confirmation_text = f"The {confirmation_interval} lane agrees with the current 4H direction."
+    elif confirmation_status == "neutral":
+        confirmation_text = f"The {confirmation_interval} lane is neutral. It is not adding extra confirmation, but it is also not vetoing the 4H trade."
+    elif confirmation_status == "blocked":
+        confirmation_text = f"The {confirmation_interval} lane points the other way, so it blocks the 4H trade."
+    elif confirmation_status == "unavailable":
+        confirmation_text = f"No usable {confirmation_interval} confirmation bar was available for this timestamp."
+    elif confirmation_status:
+        confirmation_text = f"The {confirmation_interval} confirmation filter is present but not active on this bar."
+    else:
+        confirmation_text = ""
 
     if posterior >= 0.9:
         posterior_text = "Very high state confidence, but remember this is confidence in the state label, not proof of edge."
@@ -340,7 +357,7 @@ def build_metric_interpretation_rows(
             "metric": "Held Position",
             "value": position_label(current_position),
             "interpretation": (
-                "This is the position the strategy is currently carrying. "
+                "This is the executed position the strategy is currently carrying after all guardrails and confirmation filters. "
                 + ("It already has market exposure." if current_position != 0 else "It is currently flat.")
             ),
         },
@@ -403,6 +420,15 @@ def build_metric_interpretation_rows(
             "interpretation": sample_text,
         },
     ]
+    if confirmation_status:
+        rows.insert(
+            5,
+            {
+                "metric": "Daily Confirmation",
+                "value": f"{confirmation_status} ({position_label(confirmation_direction)})",
+                "interpretation": confirmation_text,
+            },
+        )
     return pd.DataFrame(rows)
 
 
@@ -516,6 +542,15 @@ def build_control_interpretation_rows(
             "control": "Required Confirmations",
             "value": f"{strategy_config.required_confirmations}",
             "interpretation": confirmation_text,
+        },
+        {
+            "control": "Daily Confirmation Filter",
+            "value": "on" if strategy_config.require_daily_confirmation else "off",
+            "interpretation": (
+                "Daily confirmation is enforcing agreement between the slower daily lane and the 4H execution lane."
+                if strategy_config.require_daily_confirmation
+                else "Daily confirmation is off, so the 4H lane trades on its own."
+            ),
         },
         {
             "control": "Min Hold",

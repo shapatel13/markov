@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -51,6 +51,7 @@ class WalkForwardResult:
     forward_returns: pd.DataFrame
     guardrail_summary: pd.DataFrame
     converged_ratio: float
+    confirmation_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def suggest_walk_forward_config(
@@ -337,7 +338,6 @@ def compare_state_counts(
     strategy_config: StrategyConfig,
     state_range: range = range(5, 10),
 ) -> tuple[pd.DataFrame, dict[int, WalkForwardResult]]:
-    comparison_rows: list[dict[str, float | int]] = []
     results: dict[int, WalkForwardResult] = {}
 
     for n_states in state_range:
@@ -351,6 +351,13 @@ def compare_state_counts(
             strategy_config=strategy_config,
         )
         results[n_states] = result
+
+    return summarize_state_count_results(results), results
+
+
+def summarize_state_count_results(results: dict[int, WalkForwardResult]) -> pd.DataFrame:
+    comparison_rows: list[dict[str, float | int]] = []
+    for n_states, result in sorted(results.items()):
         sharpe_ci = result.bootstrap.loc[result.bootstrap["metric"] == "sharpe"].iloc[0]
         comparison_rows.append(
             {
@@ -367,6 +374,4 @@ def compare_state_counts(
                 "bootstrap_sharpe_upper": float(sharpe_ci["upper"]),
             }
         )
-
-    comparison = pd.DataFrame(comparison_rows).sort_values("n_states").reset_index(drop=True)
-    return comparison, results
+    return pd.DataFrame(comparison_rows).sort_values("n_states").reset_index(drop=True)
