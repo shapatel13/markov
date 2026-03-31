@@ -49,6 +49,55 @@ class WalkForwardResult:
     converged_ratio: float
 
 
+def suggest_walk_forward_config(
+    total_rows: int,
+    requested: WalkForwardConfig,
+    min_train_bars: int = 160,
+    min_validate_bars: int = 48,
+    min_test_bars: int = 48,
+) -> tuple[WalkForwardConfig, bool]:
+    required = requested.train_bars + requested.validate_bars + requested.test_bars
+    if total_rows >= required:
+        return requested, False
+
+    minimum_required = min_train_bars + min_validate_bars + min_test_bars
+    if total_rows < minimum_required:
+        raise ValueError(
+            f"Need at least {minimum_required} rows even for a reduced walk-forward run, received {total_rows}."
+        )
+
+    train_ratio = requested.train_bars / required
+    validate_ratio = requested.validate_bars / required
+    proposed_train = max(min_train_bars, int(total_rows * train_ratio))
+    proposed_validate = max(min_validate_bars, int(total_rows * validate_ratio))
+    proposed_test = max(min_test_bars, total_rows - proposed_train - proposed_validate)
+
+    overflow = proposed_train + proposed_validate + proposed_test - total_rows
+    if overflow > 0:
+        reducible_train = max(0, proposed_train - min_train_bars)
+        train_cut = min(reducible_train, overflow)
+        proposed_train -= train_cut
+        overflow -= train_cut
+
+    if overflow > 0:
+        reducible_validate = max(0, proposed_validate - min_validate_bars)
+        validate_cut = min(reducible_validate, overflow)
+        proposed_validate -= validate_cut
+        overflow -= validate_cut
+
+    if overflow > 0:
+        proposed_test = max(min_test_bars, proposed_test - overflow)
+
+    stride = min(requested.refit_stride_bars, proposed_test)
+    adjusted = WalkForwardConfig(
+        train_bars=proposed_train,
+        validate_bars=proposed_validate,
+        test_bars=proposed_test,
+        refit_stride_bars=max(1, stride),
+    )
+    return adjusted, True
+
+
 def generate_walk_forward_windows(total_rows: int, config: WalkForwardConfig) -> list[FoldWindow]:
     required = config.train_bars + config.validate_bars + config.test_bars
     if total_rows < required:

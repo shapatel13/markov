@@ -41,19 +41,19 @@ streamlit run app.py
 Backtest:
 
 ```powershell
-python -m markov_regime backtest --symbol SPY --interval 1hour --states 6
+python -m markov_regime backtest --symbol BTCUSD --interval 1hour --states 6
 ```
 
 Sweep:
 
 ```powershell
-python -m markov_regime sweep --symbol SPY --interval 1hour --states 6
+python -m markov_regime sweep --symbol BTCUSD --interval 1hour --states 6
 ```
 
 Export the signal report:
 
 ```powershell
-python -m markov_regime export-report --symbol SPY --interval 1hour --states 6
+python -m markov_regime export-report --symbol BTCUSD --interval 1hour --states 6
 ```
 
 Or launch the app directly:

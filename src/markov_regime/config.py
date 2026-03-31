@@ -8,7 +8,7 @@ Interval = Literal["1hour", "1day"]
 
 @dataclass(frozen=True)
 class DataConfig:
-    symbol: str = "SPY"
+    symbol: str = "BTCUSD"
     interval: Interval = "1hour"
     limit: int = 2500
     start: str | None = None
@@ -59,4 +59,3 @@ def bars_per_year(interval: Interval) -> int:
     if interval == "1day":
         return 252
     return 252 * 6
-

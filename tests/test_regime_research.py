@@ -6,6 +6,7 @@ import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.config import ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig
+from markov_regime.data import normalize_symbol
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS
 from markov_regime.reporting import export_signal_report
 from markov_regime.strategy import (
@@ -14,7 +15,7 @@ from markov_regime.strategy import (
     derive_state_actions,
     parameter_sweep,
 )
-from markov_regime.walkforward import generate_walk_forward_windows, run_walk_forward
+from markov_regime.walkforward import generate_walk_forward_windows, run_walk_forward, suggest_walk_forward_config
 
 
 def _signal_input_frame(max_posteriors: list[float]) -> pd.DataFrame:
@@ -41,6 +42,12 @@ def test_feature_frame_contains_forward_horizons(synthetic_feature_frame: pd.Dat
     assert synthetic_feature_frame.loc[:, list(FEATURE_COLUMNS)].isna().sum().sum() == 0
 
 
+def test_normalize_symbol_maps_common_crypto_aliases() -> None:
+    assert normalize_symbol("BTC") == "BTCUSD"
+    assert normalize_symbol("btc-usd") == "BTCUSD"
+    assert normalize_symbol("SPY") == "SPY"
+
+
 def test_generate_walk_forward_windows_respects_roll_stride() -> None:
     windows = generate_walk_forward_windows(
         total_rows=600,
@@ -50,6 +57,16 @@ def test_generate_walk_forward_windows_respects_roll_stride() -> None:
     assert windows[0].train_end == 300
     assert windows[1].train_start == 50
     assert windows[-1].test_end == 600
+
+
+def test_suggest_walk_forward_config_reduces_windows_to_fit_sample() -> None:
+    adjusted, was_adjusted = suggest_walk_forward_config(
+        total_rows=401,
+        requested=WalkForwardConfig(train_bars=750, validate_bars=180, test_bars=180, refit_stride_bars=180),
+    )
+    assert was_adjusted is True
+    assert adjusted.train_bars + adjusted.validate_bars + adjusted.test_bars <= 401
+    assert adjusted.refit_stride_bars <= adjusted.test_bars
 
 
 def test_guardrail_keeps_strategy_flat_when_posterior_is_low() -> None:

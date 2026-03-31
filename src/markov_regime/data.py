@@ -15,6 +15,26 @@ from markov_regime.config import DataConfig
 class DataFetchResult:
     frame: pd.DataFrame
     source_url: str
+    requested_symbol: str
+    resolved_symbol: str
+
+
+CRYPTO_ALIASES: dict[str, str] = {
+    "BTC": "BTCUSD",
+    "BTC-USD": "BTCUSD",
+    "ETH": "ETHUSD",
+    "ETH-USD": "ETHUSD",
+    "SOL": "SOLUSD",
+    "SOL-USD": "SOLUSD",
+    "DOGE": "DOGEUSD",
+    "DOGE-USD": "DOGEUSD",
+    "ADA": "ADAUSD",
+    "ADA-USD": "ADAUSD",
+    "XRP": "XRPUSD",
+    "XRP-USD": "XRPUSD",
+    "BNB": "BNBUSD",
+    "BNB-USD": "BNBUSD",
+}
 
 
 def load_api_key(explicit_key: str | None = None) -> str:
@@ -23,6 +43,11 @@ def load_api_key(explicit_key: str | None = None) -> str:
     if not api_key:
         raise ValueError("FMP_API_KEY is not set. Add it to .env or pass an explicit key.")
     return api_key
+
+
+def normalize_symbol(symbol: str) -> str:
+    cleaned = symbol.strip().upper()
+    return CRYPTO_ALIASES.get(cleaned, cleaned)
 
 
 def _hourly_url(symbol: str) -> str:
@@ -80,12 +105,13 @@ def fetch_price_data(
 ) -> DataFetchResult:
     key = load_api_key(api_key)
     client = session or requests.Session()
+    resolved_symbol = normalize_symbol(config.symbol)
     candidate_urls = (
-        [_daily_url(config.symbol), _legacy_daily_url(config.symbol)]
+        [_daily_url(resolved_symbol), _legacy_daily_url(resolved_symbol)]
         if config.interval == "1day"
-        else [_hourly_url(config.symbol), _legacy_hourly_url(config.symbol)]
+        else [_hourly_url(resolved_symbol), _legacy_hourly_url(resolved_symbol)]
     )
-    params: dict[str, str] = {"apikey": key, "symbol": config.symbol}
+    params: dict[str, str] = {"apikey": key, "symbol": resolved_symbol}
     if config.start:
         params["from"] = config.start
     if config.end:
@@ -117,4 +143,9 @@ def fetch_price_data(
     if config.limit > 0:
         frame = frame.tail(config.limit).reset_index(drop=True)
 
-    return DataFetchResult(frame=frame, source_url=response.url if response else candidate_urls[0])
+    return DataFetchResult(
+        frame=frame,
+        source_url=response.url if response else candidate_urls[0],
+        requested_symbol=config.symbol,
+        resolved_symbol=resolved_symbol,
+    )

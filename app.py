@@ -28,6 +28,7 @@ from markov_regime.ui import (
     plot_state_stability,
 )
 from markov_regime.walkforward import compare_state_counts
+from markov_regime.walkforward import suggest_walk_forward_config
 
 st.set_page_config(page_title="Markov Regime Research", layout="wide")
 
@@ -71,7 +72,7 @@ st.caption("Walk-forward HMM diagnostics with explicit guardrails, parameter sen
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    symbol = st.text_input("Symbol", value="SPY").upper()
+    symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["1hour", "1day"], index=0)
     limit = st.number_input("Bars to fetch", min_value=600, max_value=10000, value=2500, step=100)
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6)
@@ -85,54 +86,73 @@ with st.sidebar.form("controls"):
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2)
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.05, step=0.01)
     cost_bps = st.slider("Base transaction cost (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5)
+    auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
 
 if run_clicked:
-    with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
-        data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit))
-        model_config = ModelConfig(n_states=selected_states)
-        walk_config = WalkForwardConfig(
-            train_bars=int(train_bars),
-            validate_bars=int(validate_bars),
-            test_bars=int(test_bars),
-            refit_stride_bars=int(refit_stride),
+    try:
+        with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
+            data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit))
+            model_config = ModelConfig(n_states=selected_states)
+            requested_walk_config = WalkForwardConfig(
+                train_bars=int(train_bars),
+                validate_bars=int(validate_bars),
+                test_bars=int(test_bars),
+                refit_stride_bars=int(refit_stride),
+            )
+            strategy_config = StrategyConfig(
+                posterior_threshold=posterior_threshold,
+                min_hold_bars=int(min_hold_bars),
+                cooldown_bars=int(cooldown_bars),
+                required_confirmations=int(required_confirmations),
+                confidence_gap=confidence_gap,
+                cost_bps=cost_bps,
+            )
+            fetched = fetch_price_data(data_config)
+            feature_frame = build_feature_frame(fetched.frame)
+            walk_config, was_adjusted = (
+                suggest_walk_forward_config(len(feature_frame), requested_walk_config)
+                if auto_adjust_windows
+                else (requested_walk_config, False)
+            )
+            comparison, results_by_state = compare_state_counts(
+                feature_frame=feature_frame,
+                feature_columns=FEATURE_COLUMNS,
+                interval=data_config.interval,
+                model_config=model_config,
+                walk_config=walk_config,
+                strategy_config=strategy_config,
+            )
+            selected_result = results_by_state[selected_states]
+            sweep_results = parameter_sweep(
+                predictions=selected_result.predictions,
+                n_states=selected_states,
+                base_config=strategy_config,
+                sweep_config=SweepConfig(),
+                interval=data_config.interval,
+            )
+            notes = build_research_notes(selected_result, comparison)
+            st.session_state["analysis"] = {
+                "data_url": fetched.source_url,
+                "comparison": comparison,
+                "selected_result": selected_result,
+                "sweep_results": sweep_results,
+                "notes": notes,
+                "symbol": symbol,
+                "resolved_symbol": fetched.resolved_symbol,
+                "interval": interval,
+                "walk_config": walk_config,
+                "walk_adjusted": was_adjusted,
+                "available_rows": len(feature_frame),
+            }
+    except ValueError as exc:
+        st.session_state.pop("analysis", None)
+        st.error(str(exc))
+        st.info(
+            "Try a larger history, the hourly interval, or enable automatic window sizing. "
+            "For crypto, use `BTCUSD` rather than `BTC` so FMP returns the full series."
         )
-        strategy_config = StrategyConfig(
-            posterior_threshold=posterior_threshold,
-            min_hold_bars=int(min_hold_bars),
-            cooldown_bars=int(cooldown_bars),
-            required_confirmations=int(required_confirmations),
-            confidence_gap=confidence_gap,
-            cost_bps=cost_bps,
-        )
-        fetched = fetch_price_data(data_config)
-        feature_frame = build_feature_frame(fetched.frame)
-        comparison, results_by_state = compare_state_counts(
-            feature_frame=feature_frame,
-            feature_columns=FEATURE_COLUMNS,
-            interval=data_config.interval,
-            model_config=model_config,
-            walk_config=walk_config,
-            strategy_config=strategy_config,
-        )
-        selected_result = results_by_state[selected_states]
-        sweep_results = parameter_sweep(
-            predictions=selected_result.predictions,
-            n_states=selected_states,
-            base_config=strategy_config,
-            sweep_config=SweepConfig(),
-            interval=data_config.interval,
-        )
-        notes = build_research_notes(selected_result, comparison)
-        st.session_state["analysis"] = {
-            "data_url": fetched.source_url,
-            "comparison": comparison,
-            "selected_result": selected_result,
-            "sweep_results": sweep_results,
-            "notes": notes,
-            "symbol": symbol,
-            "interval": interval,
-        }
+        st.stop()
 
 analysis = st.session_state.get("analysis")
 if not analysis:
@@ -160,6 +180,18 @@ for column, (label, value) in zip(metrics_columns, metric_items, strict=True):
     column.markdown(f"<div class='metric-card'><strong>{label}</strong><br><span style='font-size:1.4rem'>{value}</span></div>", unsafe_allow_html=True)
 
 st.caption(f"Latest guardrail decision: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+if analysis.get("resolved_symbol") and analysis["resolved_symbol"] != analysis["symbol"]:
+    st.info(
+        f"Resolved symbol `{analysis['symbol']}` to `{analysis['resolved_symbol']}` for data fetch compatibility."
+    )
+if analysis.get("walk_adjusted"):
+    adjusted = analysis["walk_config"]
+    st.warning(
+        "Requested walk-forward windows were reduced to fit the available sample: "
+        f"train={adjusted.train_bars}, validate={adjusted.validate_bars}, "
+        f"test={adjusted.test_bars}, stride={adjusted.refit_stride_bars} across "
+        f"{analysis['available_rows']} usable rows."
+    )
 
 overview_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, notes_tab, export_tab = st.tabs(
     ["Overview", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Research Notes", "Exports"]

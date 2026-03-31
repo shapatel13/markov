@@ -11,7 +11,7 @@ from markov_regime.walkforward import run_walk_forward
 
 
 def _common_parser(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--symbol", default="SPY")
+    parser.add_argument("--symbol", default="BTCUSD")
     parser.add_argument("--interval", choices=["1hour", "1day"], default="1hour")
     parser.add_argument("--states", type=int, default=6)
     parser.add_argument("--limit", type=int, default=2500)
@@ -91,4 +91,3 @@ def main() -> None:
     exported = export_signal_report(result.predictions, symbol=data_config.symbol, interval=data_config.interval)
     print(f"CSV: {exported['csv']}")
     print(f"JSON: {exported['json']}")
-
