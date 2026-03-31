@@ -20,6 +20,7 @@ from markov_regime.model import (
 from markov_regime.strategy import (
     apply_trading_rules,
     attach_state_action_columns,
+    build_buy_and_hold_frame,
     compute_metrics,
     derive_state_actions,
     stress_test_transaction_costs,
@@ -31,7 +32,9 @@ class FoldWindow:
     fold_id: int
     train_start: int
     train_end: int
+    validate_start: int
     validate_end: int
+    test_start: int
     test_end: int
 
 
@@ -42,6 +45,7 @@ class WalkForwardResult:
     fold_diagnostics: pd.DataFrame
     state_stability: pd.DataFrame
     metrics: dict[str, float]
+    benchmark_metrics: dict[str, float]
     cost_stress: pd.DataFrame
     bootstrap: pd.DataFrame
     forward_returns: pd.DataFrame
@@ -56,21 +60,29 @@ def suggest_walk_forward_config(
     min_validate_bars: int = 48,
     min_test_bars: int = 48,
 ) -> tuple[WalkForwardConfig, bool]:
-    required = requested.train_bars + requested.validate_bars + requested.test_bars
+    required = (
+        requested.train_bars
+        + requested.purge_bars
+        + requested.validate_bars
+        + requested.embargo_bars
+        + requested.test_bars
+    )
     if total_rows >= required:
         return requested, False
 
-    minimum_required = min_train_bars + min_validate_bars + min_test_bars
+    minimum_required = min_train_bars + requested.purge_bars + min_validate_bars + requested.embargo_bars + min_test_bars
     if total_rows < minimum_required:
         raise ValueError(
             f"Need at least {minimum_required} rows even for a reduced walk-forward run, received {total_rows}."
         )
 
-    train_ratio = requested.train_bars / required
-    validate_ratio = requested.validate_bars / required
-    proposed_train = max(min_train_bars, int(total_rows * train_ratio))
-    proposed_validate = max(min_validate_bars, int(total_rows * validate_ratio))
-    proposed_test = max(min_test_bars, total_rows - proposed_train - proposed_validate)
+    scalable_required = requested.train_bars + requested.validate_bars + requested.test_bars
+    available_scalable = total_rows - requested.purge_bars - requested.embargo_bars
+    train_ratio = requested.train_bars / scalable_required
+    validate_ratio = requested.validate_bars / scalable_required
+    proposed_train = max(min_train_bars, int(available_scalable * train_ratio))
+    proposed_validate = max(min_validate_bars, int(available_scalable * validate_ratio))
+    proposed_test = max(min_test_bars, available_scalable - proposed_train - proposed_validate)
 
     overflow = proposed_train + proposed_validate + proposed_test - total_rows
     if overflow > 0:
@@ -91,7 +103,9 @@ def suggest_walk_forward_config(
     stride = min(requested.refit_stride_bars, proposed_test)
     adjusted = WalkForwardConfig(
         train_bars=proposed_train,
+        purge_bars=requested.purge_bars,
         validate_bars=proposed_validate,
+        embargo_bars=requested.embargo_bars,
         test_bars=proposed_test,
         refit_stride_bars=max(1, stride),
     )
@@ -99,7 +113,7 @@ def suggest_walk_forward_config(
 
 
 def generate_walk_forward_windows(total_rows: int, config: WalkForwardConfig) -> list[FoldWindow]:
-    required = config.train_bars + config.validate_bars + config.test_bars
+    required = config.train_bars + config.purge_bars + config.validate_bars + config.embargo_bars + config.test_bars
     if total_rows < required:
         raise ValueError(
             f"Need at least {required} rows for walk-forward evaluation, received {total_rows}."
@@ -110,14 +124,18 @@ def generate_walk_forward_windows(total_rows: int, config: WalkForwardConfig) ->
     fold_id = 0
     while start + required <= total_rows:
         train_end = start + config.train_bars
-        validate_end = train_end + config.validate_bars
-        test_end = validate_end + config.test_bars
+        validate_start = train_end + config.purge_bars
+        validate_end = validate_start + config.validate_bars
+        test_start = validate_end + config.embargo_bars
+        test_end = test_start + config.test_bars
         windows.append(
             FoldWindow(
                 fold_id=fold_id,
                 train_start=start,
                 train_end=train_end,
+                validate_start=validate_start,
                 validate_end=validate_end,
+                test_start=test_start,
                 test_end=test_end,
             )
         )
@@ -212,8 +230,8 @@ def run_walk_forward(
 
     for window in windows:
         train_frame = feature_frame.iloc[window.train_start:window.train_end].reset_index(drop=True)
-        validate_frame = feature_frame.iloc[window.train_end:window.validate_end].reset_index(drop=True)
-        test_frame = feature_frame.iloc[window.validate_end:window.test_end].reset_index(drop=True)
+        validate_frame = feature_frame.iloc[window.validate_start:window.validate_end].reset_index(drop=True)
+        test_frame = feature_frame.iloc[window.test_start:window.test_end].reset_index(drop=True)
 
         fitted = fit_hmm(train_frame, feature_columns, model_config)
         train_annotated = annotate_posteriors(train_frame, fitted, feature_columns)
@@ -244,7 +262,9 @@ def run_walk_forward(
         signal_frame["fold_id"] = window.fold_id
         signal_frame["train_start_time"] = train_frame["timestamp"].iloc[0]
         signal_frame["train_end_time"] = train_frame["timestamp"].iloc[-1]
+        signal_frame["validate_start_time"] = validate_frame["timestamp"].iloc[0]
         signal_frame["validate_end_time"] = validate_frame["timestamp"].iloc[-1]
+        signal_frame["test_start_time"] = test_frame["timestamp"].iloc[0]
         signal_frame["test_end_time"] = test_frame["timestamp"].iloc[-1]
         prediction_frames.append(signal_frame)
 
@@ -255,8 +275,12 @@ def run_walk_forward(
                 "fold_id": window.fold_id,
                 "train_start": window.train_start,
                 "train_end": window.train_end,
+                "validate_start": window.validate_start,
                 "validate_end": window.validate_end,
+                "test_start": window.test_start,
                 "test_end": window.test_end,
+                "purge_bars": walk_config.purge_bars,
+                "embargo_bars": walk_config.embargo_bars,
                 "converged": fitted.converged,
                 "log_likelihood": log_likelihood,
                 "aic": aic,
@@ -278,7 +302,8 @@ def run_walk_forward(
     state_detail_frame = pd.concat(state_rows).reset_index(drop=True)
     stability = _state_stability_table(state_detail_frame)
     metrics = compute_metrics(predictions, interval)
-    cost_stress = stress_test_transaction_costs(predictions, strategy_config.cost_grid, interval)
+    benchmark_metrics = compute_metrics(build_buy_and_hold_frame(predictions), interval)
+    cost_stress = stress_test_transaction_costs(predictions, strategy_config.cost_grid, interval, strategy_config)
     bootstrap = block_bootstrap_confidence_intervals(
         predictions["net_strategy_return"],
         interval=interval,
@@ -294,6 +319,7 @@ def run_walk_forward(
         fold_diagnostics=diagnostics,
         state_stability=stability,
         metrics=metrics,
+        benchmark_metrics=benchmark_metrics,
         cost_stress=cost_stress,
         bootstrap=bootstrap,
         forward_returns=forward_returns,

@@ -16,7 +16,9 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--states", type=int, default=6)
     parser.add_argument("--limit", type=int, default=2500)
     parser.add_argument("--train-bars", type=int, default=750)
+    parser.add_argument("--purge-bars", type=int, default=6)
     parser.add_argument("--validate-bars", type=int, default=180)
+    parser.add_argument("--embargo-bars", type=int, default=6)
     parser.add_argument("--test-bars", type=int, default=180)
     parser.add_argument("--refit-stride-bars", type=int, default=180)
     parser.add_argument("--posterior-threshold", type=float, default=0.65)
@@ -24,6 +26,9 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cooldown-bars", type=int, default=3)
     parser.add_argument("--required-confirmations", type=int, default=2)
     parser.add_argument("--cost-bps", type=float, default=2.0)
+    parser.add_argument("--spread-bps", type=float, default=4.0)
+    parser.add_argument("--slippage-bps", type=float, default=3.0)
+    parser.add_argument("--impact-bps", type=float, default=2.0)
 
 
 def _load_result(args: argparse.Namespace):
@@ -31,7 +36,9 @@ def _load_result(args: argparse.Namespace):
     model_config = ModelConfig(n_states=args.states)
     walk_config = WalkForwardConfig(
         train_bars=args.train_bars,
+        purge_bars=args.purge_bars,
         validate_bars=args.validate_bars,
+        embargo_bars=args.embargo_bars,
         test_bars=args.test_bars,
         refit_stride_bars=args.refit_stride_bars,
     )
@@ -41,6 +48,9 @@ def _load_result(args: argparse.Namespace):
         cooldown_bars=args.cooldown_bars,
         required_confirmations=args.required_confirmations,
         cost_bps=args.cost_bps,
+        spread_bps=args.spread_bps,
+        slippage_bps=args.slippage_bps,
+        impact_bps=args.impact_bps,
     )
 
     fetched = fetch_price_data(data_config)

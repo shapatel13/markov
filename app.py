@@ -12,10 +12,12 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig
+from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.data import fetch_price_data
 from markov_regime.features import FEATURE_COLUMNS, build_feature_frame
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
+from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
 from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
     plot_cost_stress,
@@ -24,6 +26,7 @@ from markov_regime.ui import (
     plot_guardrail_summary,
     plot_model_comparison,
     plot_regime_timeline,
+    plot_robustness_results,
     plot_sensitivity,
     plot_state_stability,
 )
@@ -78,7 +81,9 @@ with st.sidebar.form("controls"):
     limit = st.number_input("Bars to fetch", min_value=600, max_value=10000, value=2000, step=100)
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6)
     train_bars = st.number_input("Train bars", min_value=200, max_value=5000, value=720, step=24)
+    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=6, step=1)
     validate_bars = st.number_input("Validate bars", min_value=50, max_value=1500, value=120, step=12)
+    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=6, step=1)
     test_bars = st.number_input("Test bars", min_value=50, max_value=1500, value=120, step=12)
     refit_stride = st.number_input("Refit stride", min_value=25, max_value=1500, value=120, step=12)
     posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01)
@@ -86,7 +91,11 @@ with st.sidebar.form("controls"):
     cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4)
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2)
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01)
-    cost_bps = st.slider("Base transaction cost (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5)
+    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5)
+    spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5)
+    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5)
+    impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5)
+    robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
 
@@ -97,7 +106,9 @@ if run_clicked:
             model_config = ModelConfig(n_states=selected_states)
             requested_walk_config = WalkForwardConfig(
                 train_bars=int(train_bars),
+                purge_bars=int(purge_bars),
                 validate_bars=int(validate_bars),
+                embargo_bars=int(embargo_bars),
                 test_bars=int(test_bars),
                 refit_stride_bars=int(refit_stride),
             )
@@ -108,6 +119,9 @@ if run_clicked:
                 required_confirmations=int(required_confirmations),
                 confidence_gap=confidence_gap,
                 cost_bps=cost_bps,
+                spread_bps=spread_bps,
+                slippage_bps=slippage_bps,
+                impact_bps=impact_bps,
             )
             fetched = fetch_price_data(data_config)
             feature_frame = build_feature_frame(fetched.frame)
@@ -132,16 +146,47 @@ if run_clicked:
                 sweep_config=SweepConfig(),
                 interval=data_config.interval,
             )
+            robustness = run_multi_asset_robustness(
+                symbols=parse_symbol_list(robustness_symbols),
+                interval=data_config.interval,
+                limit=int(limit),
+                feature_columns=FEATURE_COLUMNS,
+                model_config=model_config,
+                walk_config=walk_config,
+                strategy_config=strategy_config,
+                auto_adjust_windows=auto_adjust_windows,
+            )
             notes = build_research_notes(selected_result, comparison)
+            artifact = write_run_artifact_bundle(
+                symbol=symbol,
+                resolved_symbol=fetched.resolved_symbol,
+                interval=interval,
+                data_url=fetched.source_url,
+                raw_frame=fetched.frame,
+                feature_frame=feature_frame,
+                data_config=data_config,
+                model_config=model_config,
+                walk_config=walk_config,
+                strategy_config=strategy_config,
+                selected_result=selected_result,
+                comparison=comparison,
+                sweep_results=sweep_results,
+                notes=notes,
+                robustness=robustness,
+            )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
                 "comparison": comparison,
                 "selected_result": selected_result,
                 "sweep_results": sweep_results,
+                "robustness": robustness,
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
                 "interval": interval,
+                "data_config": data_config,
+                "model_config": model_config,
+                "strategy_config": strategy_config,
                 "walk_config": walk_config,
                 "walk_adjusted": was_adjusted,
                 "available_rows": len(feature_frame),
@@ -151,6 +196,9 @@ if run_clicked:
                 "raw_start": fetched.frame["timestamp"].iloc[0],
                 "raw_end": fetched.frame["timestamp"].iloc[-1],
                 "latest_close": float(fetched.frame["close"].iloc[-1]),
+                "artifact_run_id": artifact.run_id,
+                "artifact_root": str(artifact.root),
+                "artifact_manifest": str(artifact.manifest_path),
             }
     except ValueError as exc:
         st.session_state.pop("analysis", None)
@@ -169,6 +217,7 @@ if not analysis:
 comparison = analysis["comparison"]
 selected_result = analysis["selected_result"]
 sweep_results = analysis["sweep_results"]
+robustness = analysis["robustness"]
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 
@@ -195,9 +244,16 @@ if analysis.get("walk_adjusted"):
     adjusted = analysis["walk_config"]
     st.warning(
         "Requested walk-forward windows were reduced to fit the available sample: "
-        f"train={adjusted.train_bars}, validate={adjusted.validate_bars}, "
-        f"test={adjusted.test_bars}, stride={adjusted.refit_stride_bars} across "
+        f"train={adjusted.train_bars}, purge={adjusted.purge_bars}, validate={adjusted.validate_bars}, "
+        f"embargo={adjusted.embargo_bars}, test={adjusted.test_bars}, stride={adjusted.refit_stride_bars} across "
         f"{analysis['available_rows']} usable rows."
+    )
+else:
+    current_walk = analysis["walk_config"]
+    st.caption(
+        "Walk-forward layout: "
+        f"train={current_walk.train_bars}, purge={current_walk.purge_bars}, validate={current_walk.validate_bars}, "
+        f"embargo={current_walk.embargo_bars}, test={current_walk.test_bars}, stride={current_walk.refit_stride_bars}"
     )
 
 data_columns = st.columns(5)
@@ -218,8 +274,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Research Notes", "Exports"]
+overview_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -228,7 +284,13 @@ with overview_tab:
         st.plotly_chart(plot_equity_curve(selected_result.predictions), use_container_width=True)
         st.plotly_chart(plot_regime_timeline(selected_result.predictions), use_container_width=True)
     with right:
-        st.dataframe(pd.DataFrame([selected_result.metrics]).T.rename(columns={0: "value"}), use_container_width=True)
+        metric_frame = pd.DataFrame(
+            {
+                "strategy": pd.Series(selected_result.metrics),
+                "buy_and_hold": pd.Series(selected_result.benchmark_metrics),
+            }
+        )
+        st.dataframe(metric_frame, use_container_width=True)
         st.plotly_chart(plot_guardrail_summary(selected_result.guardrail_summary), use_container_width=True)
         st.plotly_chart(plot_cost_stress(selected_result.cost_stress), use_container_width=True)
 
@@ -262,12 +324,20 @@ with confidence_tab:
     st.subheader("Fold Diagnostics")
     st.dataframe(selected_result.fold_diagnostics, use_container_width=True)
 
+with robustness_tab:
+    st.plotly_chart(plot_robustness_results(robustness), use_container_width=True)
+    st.dataframe(robustness, use_container_width=True)
+
 with notes_tab:
     st.subheader("Research Notes")
     for note in notes:
         st.markdown(f"<div class='note-card'>{note}</div>", unsafe_allow_html=True)
 
 with export_tab:
+    st.subheader("Run Artifacts")
+    st.write(f"Snapshot run id: `{analysis['artifact_run_id']}`")
+    st.write(f"Artifact folder: `{analysis['artifact_root']}`")
+    st.write(f"Manifest: `{analysis['artifact_manifest']}`")
     st.write("Save the current signal history in both CSV and JSON formats.")
     if st.button("Export current signal report"):
         exported = export_signal_report(

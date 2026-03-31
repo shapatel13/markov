@@ -27,7 +27,9 @@ class ModelConfig:
 @dataclass(frozen=True)
 class WalkForwardConfig:
     train_bars: int = 750
+    purge_bars: int = 6
     validate_bars: int = 180
+    embargo_bars: int = 6
     test_bars: int = 180
     refit_stride_bars: int = 180
 
@@ -44,6 +46,11 @@ class StrategyConfig:
     signal_horizon: int = 6
     allow_short: bool = False
     cost_bps: float = 2.0
+    spread_bps: float = 4.0
+    slippage_bps: float = 3.0
+    impact_bps: float = 2.0
+    range_impact_weight: float = 0.15
+    volume_reference: float = 1_000_000.0
     cost_grid: tuple[float, ...] = (0.0, 2.0, 5.0, 10.0, 20.0)
 
 

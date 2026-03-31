@@ -63,7 +63,7 @@ def plot_cost_stress(cost_stress: pd.DataFrame) -> go.Figure:
         )
     )
     figure.update_layout(
-        title="Transaction Cost Stress Test",
+        title="Transaction Cost Stress Test (Dynamic Base + Extra Bps)",
         template="plotly_white",
         xaxis=dict(title="Cost (bps)"),
         yaxis=dict(title="Sharpe"),
@@ -122,6 +122,37 @@ def plot_guardrail_summary(guardrails: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def plot_robustness_results(robustness: pd.DataFrame) -> go.Figure:
+    if robustness.empty or "status" not in robustness.columns:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Cross-Asset Robustness vs Buy-and-Hold",
+            template="plotly_white",
+            annotations=[dict(text="No robustness basket configured", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+    ok_rows = robustness.loc[robustness["status"] == "ok"].copy()
+    if ok_rows.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Cross-Asset Robustness vs Buy-and-Hold",
+            template="plotly_white",
+            annotations=[dict(text="No successful robustness runs", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+    figure = px.bar(
+        ok_rows,
+        x="resolved_symbol",
+        y=["sharpe", "benchmark_sharpe"],
+        barmode="group",
+        title="Cross-Asset Robustness vs Buy-and-Hold",
+    )
+    figure.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=50, b=20))
+    return figure
+
+
 def sensitivity_aggregate(sweep_results: pd.DataFrame, parameter: str, metric: str) -> pd.DataFrame:
     aggregated = (
         sweep_results.groupby(parameter, as_index=False)[metric]
@@ -142,4 +173,3 @@ def plot_sensitivity(sweep_results: pd.DataFrame, parameter: str, metric: str) -
     )
     figure.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=50, b=20))
     return figure
-

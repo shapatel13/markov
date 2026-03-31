@@ -35,6 +35,11 @@ def build_research_notes(
             f"Only {coverage:.0%} of bars pass the directional guardrails, which is good for caution but also means the live signal will often be inactive and statistically thin."
         )
 
+    if selected_result.metrics.get("annualized_return", 0.0) < selected_result.benchmark_metrics.get("annualized_return", 0.0):
+        notes.append(
+            "The strategy currently trails buy-and-hold on the same out-of-sample slices, which means timing precision has not yet earned back its added complexity."
+        )
+
     cost_row = selected_result.cost_stress.loc[selected_result.cost_stress["sharpe"] <= 0.0]
     if not cost_row.empty:
         first_break = float(cost_row.iloc[0]["cost_bps"])
@@ -49,4 +54,3 @@ def build_research_notes(
         "Validation windows are short relative to market non-stationarity, so regime labels can overreact to recent noise even with walk-forward separation."
     )
     return notes
-

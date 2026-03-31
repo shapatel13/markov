@@ -151,11 +151,31 @@ def apply_trading_rules(
     signal_frame = pd.DataFrame(rows)
     signal_frame["turnover"] = signal_frame["signal_position"].diff().abs().fillna(abs(signal_frame["signal_position"].iloc[0]))
     signal_frame["gross_strategy_return"] = signal_frame["signal_position"].shift(1).fillna(0.0) * signal_frame["bar_return"]
-    signal_frame["transaction_cost"] = signal_frame["turnover"] * (config.cost_bps / 10_000.0)
+    signal_frame["execution_cost_bps"] = estimate_execution_cost_bps(signal_frame, config)
+    signal_frame["transaction_cost"] = signal_frame["turnover"] * (signal_frame["execution_cost_bps"] / 10_000.0)
     signal_frame["net_strategy_return"] = signal_frame["gross_strategy_return"] - signal_frame["transaction_cost"]
     signal_frame["asset_wealth"] = (1.0 + signal_frame["bar_return"]).cumprod()
     signal_frame["strategy_wealth"] = (1.0 + signal_frame["net_strategy_return"]).cumprod()
     return signal_frame
+
+
+def estimate_execution_cost_bps(
+    signal_frame: pd.DataFrame,
+    config: StrategyConfig,
+    extra_bps: float = 0.0,
+) -> pd.Series:
+    if "range_ratio" in signal_frame.columns:
+        range_ratio = signal_frame["range_ratio"].fillna(0.0)
+    else:
+        range_ratio = ((signal_frame["high"] - signal_frame["low"]) / signal_frame["close"].replace(0.0, np.nan)).fillna(0.0)
+
+    volume = signal_frame.get("volume", pd.Series(config.volume_reference, index=signal_frame.index)).replace(0.0, np.nan)
+    liquidity_penalty = np.sqrt(config.volume_reference / volume.fillna(config.volume_reference))
+    liquidity_penalty = liquidity_penalty.replace([np.inf, -np.inf], 1.0).clip(lower=0.25, upper=4.0)
+    range_component = (range_ratio * 10_000.0 * config.range_impact_weight).clip(lower=0.0)
+
+    base_cost = config.cost_bps + config.spread_bps + config.slippage_bps + extra_bps
+    return (base_cost + range_component + config.impact_bps * liquidity_penalty).astype(float)
 
 
 def compute_metrics(signal_frame: pd.DataFrame, interval: Interval) -> dict[str, float]:
@@ -202,13 +222,15 @@ def stress_test_transaction_costs(
     signal_frame: pd.DataFrame,
     cost_grid: tuple[float, ...],
     interval: Interval,
+    config: StrategyConfig,
 ) -> pd.DataFrame:
     rows: list[dict[str, float]] = []
     gross_return = signal_frame["gross_strategy_return"].fillna(0.0)
     turnover = signal_frame["turnover"].fillna(0.0)
     for cost_bps in cost_grid:
         stressed = signal_frame.copy()
-        stressed["transaction_cost"] = turnover * (cost_bps / 10_000.0)
+        stressed["execution_cost_bps"] = estimate_execution_cost_bps(stressed, config, extra_bps=cost_bps)
+        stressed["transaction_cost"] = turnover * (stressed["execution_cost_bps"] / 10_000.0)
         stressed["net_strategy_return"] = gross_return - stressed["transaction_cost"]
         stressed["strategy_wealth"] = (1.0 + stressed["net_strategy_return"]).cumprod()
         metrics = compute_metrics(stressed, interval)
@@ -296,3 +318,17 @@ def parameter_sweep(
             }
         )
     return pd.DataFrame(rows).sort_values("sharpe", ascending=False).reset_index(drop=True)
+
+
+def build_buy_and_hold_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    benchmark = frame.copy()
+    benchmark["candidate_action"] = 1
+    benchmark["signal_position"] = 1
+    benchmark["turnover"] = 0.0
+    benchmark["execution_cost_bps"] = 0.0
+    benchmark["transaction_cost"] = 0.0
+    benchmark["gross_strategy_return"] = benchmark["bar_return"]
+    benchmark["net_strategy_return"] = benchmark["bar_return"]
+    benchmark["asset_wealth"] = (1.0 + benchmark["bar_return"]).cumprod()
+    benchmark["strategy_wealth"] = benchmark["asset_wealth"]
+    return benchmark

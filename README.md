@@ -6,11 +6,14 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 
 - Fetches daily or hourly bars from Financial Modeling Prep.
 - Builds a compact return, volatility, range, and volume feature set.
-- Runs explicit train / validate / test walk-forward retraining with rolling refits.
+- Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
 - Compares 5 through 9 HMM states side by side.
 - Aligns states across retrains and reports stability diagnostics.
 - Sweeps posterior threshold, minimum hold, cooldown, and required confirmations.
 - Reports block-bootstrap confidence intervals and transaction cost stress tests.
+- Adds dynamic crypto execution frictions using fees, spread, slippage, intrabar range, and liquidity impact.
+- Logs reproducible local run artifacts with config snapshots, manifests, and exported tables.
+- Checks robustness across a multi-asset basket instead of only the primary symbol.
 - Exports the signal history as both CSV and JSON.
 
 ## Quick Start
@@ -67,11 +70,13 @@ python -m streamlit run app.py
 
 ## Methodology Notes
 
-- Training, validation, and test windows are fully separated in each fold.
+- Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
 - State labels are re-aligned after every refit because raw HMM state IDs are not stable.
 - Directional actions come from validation-window forward returns, not the in-sample training fit.
 - The strategy prefers flat exposure when posterior confidence is marginal or when validation support is weak.
 - Major metrics are paired with moving block bootstrap confidence intervals to avoid treating a single backtest path as definitive.
+- Every app run writes a local artifact bundle in `artifacts/` with the config snapshot, manifest, model tables, robustness table, and signal report.
+- The displayed strategy performance is now compared against buy-and-hold on the same test slices.
 
 ## Outputs
 
@@ -80,6 +85,8 @@ python -m streamlit run app.py
 - State stability table across retrains.
 - Regime-conditioned forward return table for 1, 3, 6, 12, 24, and 72 bars.
 - Sensitivity plots for posterior threshold, min hold, cooldown, and confirmation count.
+- Cross-asset robustness table for the configured basket.
+- Artifact manifests and CSV snapshots in `artifacts/`.
 - Exported signal reports in `exports/`.
 
 ## Known Failure Modes
@@ -88,7 +95,9 @@ python -m streamlit run app.py
 - Small validation windows can make state-to-action mappings noisy, especially for infrequent states.
 - State-count selection matters: if 5-9 states produce materially different results, the regime story is fragile.
 - Backtest quality can deteriorate quickly once transaction costs, slippage, or stale fills are introduced.
+- Even the richer friction model is still an approximation; it is not a substitute for exchange-specific order book replay or venue-level fill data.
 - Bootstrap intervals may still understate uncertainty during structural breaks because the future may not resemble any resampled past block.
 - Forward-return tables can look attractive when a regime occurs rarely; sample count should always be read with the mean.
 - Hourly bars from API vendors can contain gaps, late prints, or symbol-specific quirks that distort fitted transitions.
 - A conservative flat signal is a feature, not a bug: low-confidence bars are intentionally filtered instead of forced into trades.
+- Multi-asset robustness helps, but three or four liquid coins still do not guarantee the signal generalizes across regimes or venues.

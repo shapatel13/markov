@@ -25,6 +25,7 @@ def build_signal_report(predictions: pd.DataFrame) -> pd.DataFrame:
         "guardrail_reason",
         "bar_return",
         "gross_strategy_return",
+        "execution_cost_bps",
         "transaction_cost",
         "net_strategy_return",
         "strategy_wealth",
@@ -54,4 +55,3 @@ def export_signal_report(
     json_ready.to_json(json_path, orient="records", indent=2)
 
     return {"csv": csv_path, "json": json_path}
-
