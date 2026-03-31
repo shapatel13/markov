@@ -11,10 +11,11 @@ SRC_PATH = ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig
+from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.data import fetch_price_data
-from markov_regime.features import FEATURE_COLUMNS, build_feature_frame
+from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.research import run_feature_pack_comparison, run_timeframe_comparison
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
@@ -25,10 +26,12 @@ from markov_regime.ui import (
     plot_forward_return_heatmap,
     plot_guardrail_summary,
     plot_model_comparison,
+    plot_feature_pack_comparison,
     plot_regime_timeline,
     plot_robustness_results,
     plot_sensitivity,
     plot_state_stability,
+    plot_timeframe_comparison,
 )
 from markov_regime.walkforward import compare_state_counts
 from markov_regime.walkforward import suggest_walk_forward_config
@@ -71,23 +74,25 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("BTC hourly preset with walk-forward HMM diagnostics, explicit guardrails, parameter sensitivity, and confidence intervals.")
+st.caption("BTC 4H preset with daily confirmation, walk-forward HMM diagnostics, explicit guardrails, and confidence intervals.")
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC hourly with moderate rolling windows for local research.")
+    st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
-    interval = st.selectbox("Interval", options=["1hour", "1day"], index=0)
-    limit = st.number_input("Bars to fetch", min_value=600, max_value=10000, value=2000, step=100)
+    interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0)
+    default_walk = default_walk_forward_config(interval)
+    feature_pack = st.selectbox("Feature pack", options=list(list_feature_packs()), index=0)
+    limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100)
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6)
-    train_bars = st.number_input("Train bars", min_value=200, max_value=5000, value=720, step=24)
-    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=6, step=1)
-    validate_bars = st.number_input("Validate bars", min_value=50, max_value=1500, value=120, step=12)
-    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=6, step=1)
-    test_bars = st.number_input("Test bars", min_value=50, max_value=1500, value=120, step=12)
-    refit_stride = st.number_input("Refit stride", min_value=25, max_value=1500, value=120, step=12)
+    train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12)
+    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=default_walk.purge_bars, step=1)
+    validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, value=default_walk.validate_bars, step=12)
+    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=default_walk.embargo_bars, step=1)
+    test_bars = st.number_input("Test bars", min_value=24, max_value=1500, value=default_walk.test_bars, step=12)
+    refit_stride = st.number_input("Refit stride", min_value=24, max_value=1500, value=default_walk.refit_stride_bars, step=12)
     posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01)
-    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=4)
+    min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=6)
     cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4)
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2)
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01)
@@ -96,6 +101,8 @@ with st.sidebar.form("controls"):
     slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5)
     impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5)
     robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
+    run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
+    run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
 
@@ -104,6 +111,7 @@ if run_clicked:
         with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
             data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit))
             model_config = ModelConfig(n_states=selected_states)
+            feature_columns = get_feature_columns(feature_pack)
             requested_walk_config = WalkForwardConfig(
                 train_bars=int(train_bars),
                 purge_bars=int(purge_bars),
@@ -124,7 +132,7 @@ if run_clicked:
                 impact_bps=impact_bps,
             )
             fetched = fetch_price_data(data_config)
-            feature_frame = build_feature_frame(fetched.frame)
+            feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
             walk_config, was_adjusted = (
                 suggest_walk_forward_config(len(feature_frame), requested_walk_config)
                 if auto_adjust_windows
@@ -132,7 +140,7 @@ if run_clicked:
             )
             comparison, results_by_state = compare_state_counts(
                 feature_frame=feature_frame,
-                feature_columns=FEATURE_COLUMNS,
+                feature_columns=feature_columns,
                 interval=data_config.interval,
                 model_config=model_config,
                 walk_config=walk_config,
@@ -150,11 +158,35 @@ if run_clicked:
                 symbols=parse_symbol_list(robustness_symbols),
                 interval=data_config.interval,
                 limit=int(limit),
-                feature_columns=FEATURE_COLUMNS,
+                feature_columns=feature_columns,
                 model_config=model_config,
                 walk_config=walk_config,
                 strategy_config=strategy_config,
                 auto_adjust_windows=auto_adjust_windows,
+            )
+            timeframe_comparison = (
+                run_timeframe_comparison(
+                    symbol=symbol,
+                    limit=int(limit),
+                    model_config=model_config,
+                    strategy_config=strategy_config,
+                    feature_pack=feature_pack,
+                    feature_columns=feature_columns,
+                    auto_adjust_windows=auto_adjust_windows,
+                )
+                if run_timeframe_check
+                else pd.DataFrame()
+            )
+            feature_pack_comparison = (
+                run_feature_pack_comparison(
+                    price_frame=fetched.frame,
+                    interval=data_config.interval,
+                    model_config=model_config,
+                    strategy_config=strategy_config,
+                    auto_adjust_windows=auto_adjust_windows,
+                )
+                if run_feature_pack_check
+                else pd.DataFrame()
             )
             notes = build_research_notes(selected_result, comparison)
             artifact = write_run_artifact_bundle(
@@ -173,6 +205,9 @@ if run_clicked:
                 sweep_results=sweep_results,
                 notes=notes,
                 robustness=robustness,
+                feature_columns=feature_columns,
+                timeframe_comparison=timeframe_comparison,
+                feature_pack_comparison=feature_pack_comparison,
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
@@ -180,12 +215,16 @@ if run_clicked:
                 "selected_result": selected_result,
                 "sweep_results": sweep_results,
                 "robustness": robustness,
+                "timeframe_comparison": timeframe_comparison,
+                "feature_pack_comparison": feature_pack_comparison,
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
                 "interval": interval,
                 "data_config": data_config,
                 "model_config": model_config,
+                "feature_pack": feature_pack,
+                "feature_columns": feature_columns,
                 "strategy_config": strategy_config,
                 "walk_config": walk_config,
                 "walk_adjusted": was_adjusted,
@@ -204,7 +243,7 @@ if run_clicked:
         st.session_state.pop("analysis", None)
         st.error(str(exc))
         st.info(
-            "Try a larger history, the hourly interval, or enable automatic window sizing. "
+            "Try a larger history, a higher timeframe like `4hour` or `1day`, or enable automatic window sizing. "
             "For crypto, use `BTCUSD` rather than `BTC` so FMP returns the full series."
         )
         st.stop()
@@ -218,6 +257,8 @@ comparison = analysis["comparison"]
 selected_result = analysis["selected_result"]
 sweep_results = analysis["sweep_results"]
 robustness = analysis["robustness"]
+timeframe_comparison = analysis["timeframe_comparison"]
+feature_pack_comparison = analysis["feature_pack_comparison"]
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 
@@ -236,6 +277,7 @@ for column, (label, value) in zip(metrics_columns, metric_items, strict=True):
     column.markdown(f"<div class='metric-card'><strong>{label}</strong><br><span style='font-size:1.4rem'>{value}</span></div>", unsafe_allow_html=True)
 
 st.caption(f"Latest guardrail decision: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+st.caption(f"Feature pack: `{analysis['feature_pack']}`")
 if analysis.get("resolved_symbol") and analysis["resolved_symbol"] != analysis["symbol"]:
     st.info(
         f"Resolved symbol `{analysis['symbol']}` to `{analysis['resolved_symbol']}` for data fetch compatibility."
@@ -274,8 +316,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -293,6 +335,16 @@ with overview_tab:
         st.dataframe(metric_frame, use_container_width=True)
         st.plotly_chart(plot_guardrail_summary(selected_result.guardrail_summary), use_container_width=True)
         st.plotly_chart(plot_cost_stress(selected_result.cost_stress), use_container_width=True)
+
+with timeframe_tab:
+    st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
+    st.dataframe(timeframe_comparison, use_container_width=True)
+    st.caption("The timeframe comparison uses the same strategy controls but interval-specific walk-forward window presets across `4hour`, `1day`, and `1hour`. Treat it as a relative sanity check, not a perfect apples-to-apples scorecard.")
+
+with feature_tab:
+    st.plotly_chart(plot_feature_pack_comparison(feature_pack_comparison), use_container_width=True)
+    st.dataframe(feature_pack_comparison, use_container_width=True)
+    st.caption("Feature-pack ablation holds the timeframe and strategy controls fixed while changing what the HMM sees. This is the cleanest way to tell whether signal improvements are coming from better market representation or just tighter filters.")
 
 with model_tab:
     st.plotly_chart(plot_model_comparison(comparison), use_container_width=True)

@@ -10,3 +10,4 @@ dist/
 artifacts/
 exports/*.csv
 exports/*.json
+results.tsv

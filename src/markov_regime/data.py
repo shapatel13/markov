@@ -111,6 +111,26 @@ def _redact_api_key(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(redacted_query), parts.fragment))
 
 
+def _resample_ohlcv(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
+    if interval != "4hour":
+        return frame
+
+    indexed = frame.sort_values("timestamp").set_index("timestamp")
+    aggregated = indexed.resample("4h", label="right", closed="right").agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+        bar_count=("close", "size"),
+    )
+    complete = aggregated.loc[aggregated["bar_count"] == 4].drop(columns="bar_count")
+    complete = complete.dropna(subset=["open", "high", "low", "close"]).reset_index()
+    if complete.empty:
+        raise ValueError("Unable to build complete 4-hour candles from the fetched hourly series.")
+    return complete
+
+
 def fetch_price_data(
     config: DataConfig,
     api_key: str | None = None,
@@ -153,6 +173,7 @@ def fetch_price_data(
         frame = frame.loc[frame["timestamp"] >= pd.Timestamp(config.start)].copy()
     if config.end:
         frame = frame.loc[frame["timestamp"] <= pd.Timestamp(config.end)].copy()
+    frame = _resample_ohlcv(frame, config.interval)
     if config.limit > 0:
         frame = frame.tail(config.limit).reset_index(drop=True)
 

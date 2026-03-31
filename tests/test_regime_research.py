@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
-from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig
+from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
 from markov_regime.data import normalize_symbol
-from markov_regime.data import _redact_api_key
-from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS
+from markov_regime.data import _redact_api_key, _resample_ohlcv
+from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.research import (
+    ResearchProgram,
+    _candidate_grid,
+    _fold_consistency_metrics,
+    ensure_results_tsv,
+    load_research_program,
+    run_feature_pack_comparison,
+    write_research_program,
+)
 from markov_regime.reporting import export_signal_report
 from markov_regime.robustness import parse_symbol_list
 from markov_regime.strategy import (
@@ -46,6 +56,16 @@ def test_feature_frame_contains_forward_horizons(synthetic_feature_frame: pd.Dat
     assert synthetic_feature_frame.loc[:, list(FEATURE_COLUMNS)].isna().sum().sum() == 0
 
 
+def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFrame) -> None:
+    assert {"baseline", "trend", "volatility", "regime_mix"}.issubset(set(list_feature_packs()))
+
+    trend_columns = get_feature_columns("trend")
+    trend_frame = build_feature_frame(synthetic_prices, feature_columns=trend_columns)
+
+    assert "ema_gap_24" in trend_columns
+    assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
+
+
 def test_normalize_symbol_maps_common_crypto_aliases() -> None:
     assert normalize_symbol("BTC") == "BTCUSD"
     assert normalize_symbol("btc-usd") == "BTCUSD"
@@ -56,6 +76,27 @@ def test_redact_api_key_hides_secret_in_source_url() -> None:
     redacted = _redact_api_key("https://example.com/path?apikey=supersecret&symbol=BTCUSD")
     assert "supersecret" not in redacted
     assert "apikey=%2A%2A%2A" in redacted
+
+
+def test_resample_ohlcv_builds_complete_4hour_bars_and_drops_partial() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01 01:00:00", periods=9, freq="h"),
+            "open": [100.0 + index for index in range(9)],
+            "high": [101.0 + index for index in range(9)],
+            "low": [99.0 + index for index in range(9)],
+            "close": [100.5 + index for index in range(9)],
+            "volume": [10.0] * 9,
+        }
+    )
+
+    resampled = _resample_ohlcv(frame, "4hour")
+
+    assert len(resampled) == 2
+    assert resampled["timestamp"].dt.hour.tolist() == [4, 8]
+    assert float(resampled.iloc[0]["open"]) == 100.0
+    assert float(resampled.iloc[0]["close"]) == 103.5
+    assert float(resampled.iloc[0]["volume"]) == 40.0
 
 
 def test_generate_walk_forward_windows_respects_roll_stride() -> None:
@@ -182,6 +223,106 @@ def test_export_signal_report_writes_csv_and_json(tmp_path: Path) -> None:
     assert exported["json"].suffix == ".json"
 
 
+def test_bars_per_year_supports_4hour_crypto_calendar() -> None:
+    assert bars_per_year("1hour") == 24 * 365
+    assert bars_per_year("4hour") == 6 * 365
+    assert bars_per_year("1day") == 365
+
+
+def test_default_walk_forward_config_prefers_higher_timeframe_windows() -> None:
+    four_hour = default_walk_forward_config("4hour")
+    one_hour = default_walk_forward_config("1hour")
+
+    assert four_hour.train_bars < one_hour.train_bars
+    assert four_hour.validate_bars < one_hour.validate_bars
+    assert four_hour.test_bars < one_hour.test_bars
+
+
+def test_research_program_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "research_program.md"
+    write_research_program(
+        path,
+        ResearchProgram(
+            symbol="ETHUSD",
+            intervals=("4hour", "1day", "1hour"),
+            feature_packs=("trend", "regime_mix"),
+            max_candidates=8,
+            artifact_top_k=2,
+        ),
+    )
+    loaded = load_research_program(path)
+
+    assert loaded.symbol == "ETHUSD"
+    assert loaded.intervals == ("4hour", "1day", "1hour")
+    assert loaded.feature_packs == ("trend", "regime_mix")
+    assert loaded.max_candidates == 8
+    assert loaded.artifact_top_k == 2
+
+
+def test_candidate_grid_prioritizes_4hour_then_1day_then_1hour() -> None:
+    grid = _candidate_grid(
+        ResearchProgram(
+            intervals=("1hour", "1day", "4hour"),
+            feature_packs=("baseline",),
+            state_counts=(6,),
+            posterior_thresholds=(0.65,),
+            min_hold_bars=(6,),
+            cooldown_bars=(4,),
+            required_confirmations=(2,),
+            max_candidates=3,
+        )
+    )
+
+    assert [candidate[0] for candidate in grid] == ["4hour", "1day", "1hour"]
+
+
+def test_ensure_results_tsv_writes_header(tmp_path: Path) -> None:
+    path = ensure_results_tsv(tmp_path / "results.tsv")
+    header = path.read_text(encoding="utf-8").strip().split("\t")
+
+    assert path.exists()
+    assert header[0] == "created_at_utc"
+    assert header[-1] == "notes"
+
+
+def test_fold_consistency_metrics_split_early_and_late_folds() -> None:
+    result = type(
+        "DummyResult",
+        (),
+        {
+            "fold_diagnostics": pd.DataFrame(
+                [
+                    {"fold_id": 0, "sharpe": 1.0},
+                    {"fold_id": 1, "sharpe": 0.5},
+                    {"fold_id": 2, "sharpe": -0.25},
+                    {"fold_id": 3, "sharpe": -0.75},
+                ]
+            )
+        },
+    )()
+
+    metrics = _fold_consistency_metrics(result)
+
+    assert metrics["selection_sharpe"] == 0.75
+    assert metrics["confirmation_sharpe"] == -0.5
+    assert metrics["fold_consistency_gap"] == 1.25
+
+
+def test_feature_pack_comparison_runs_on_synthetic_prices(synthetic_prices: pd.DataFrame) -> None:
+    comparison = run_feature_pack_comparison(
+        price_frame=synthetic_prices,
+        interval="1hour",
+        model_config=ModelConfig(n_states=5, random_state=11, n_iter=150),
+        strategy_config=StrategyConfig(required_confirmations=1, min_validation_samples=10),
+        feature_packs=("baseline", "regime_mix"),
+        auto_adjust_windows=True,
+    )
+
+    assert set(comparison["feature_pack"]) == {"baseline", "regime_mix"}
+    assert (comparison["status"] == "ok").all()
+    assert {"selection_sharpe", "confirmation_sharpe", "fold_consistency_gap"}.issubset(comparison.columns)
+
+
 def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataFrame) -> None:
     result = run_walk_forward(
         feature_frame=synthetic_feature_frame,
@@ -229,7 +370,14 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
         sweep_results=pd.DataFrame([{"posterior_threshold": 0.7, "sharpe": result.metrics["sharpe"]}]),
         notes=["artifact test"],
         robustness=pd.DataFrame([{"symbol": "BTCUSD", "status": "ok", "sharpe": result.metrics["sharpe"]}]),
+        feature_columns=FEATURE_COLUMNS,
+        metadata={"feature_pack": "baseline"},
+        timeframe_comparison=pd.DataFrame([{"interval": "4hour", "status": "ok", "sharpe": result.metrics["sharpe"]}]),
         export_dir=tmp_path,
     )
     assert bundle.manifest_path.exists()
     assert bundle.files["signal_report_csv"].exists()
+    assert bundle.files["timeframe_comparison_csv"].exists()
+    manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["feature_columns"] == list(FEATURE_COLUMNS)
+    assert manifest["metadata"]["feature_pack"] == "baseline"

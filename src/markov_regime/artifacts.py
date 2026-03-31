@@ -66,6 +66,10 @@ def write_run_artifact_bundle(
     sweep_results: pd.DataFrame,
     notes: list[str],
     robustness: pd.DataFrame,
+    feature_columns: tuple[str, ...] | None = None,
+    metadata: dict[str, Any] | None = None,
+    timeframe_comparison: pd.DataFrame | None = None,
+    feature_pack_comparison: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -86,6 +90,10 @@ def write_run_artifact_bundle(
     files["guardrails_csv"] = _write_table(selected_result.guardrail_summary, root / "guardrails.csv")
     files["sweep_results_csv"] = _write_table(sweep_results, root / "sweep_results.csv")
     files["robustness_csv"] = _write_table(robustness, root / "robustness.csv")
+    if timeframe_comparison is not None and not timeframe_comparison.empty:
+        files["timeframe_comparison_csv"] = _write_table(timeframe_comparison, root / "timeframe_comparison.csv")
+    if feature_pack_comparison is not None and not feature_pack_comparison.empty:
+        files["feature_pack_comparison_csv"] = _write_table(feature_pack_comparison, root / "feature_pack_comparison.csv")
 
     manifest = {
         "schema_version": 1,
@@ -102,6 +110,7 @@ def write_run_artifact_bundle(
         "model_config": asdict(model_config),
         "walk_config": asdict(walk_config),
         "strategy_config": asdict(strategy_config),
+        "feature_columns": list(feature_columns) if feature_columns is not None else None,
         "data_summary": {
             "raw_rows": int(len(raw_frame)),
             "feature_rows": int(len(feature_frame)),
@@ -121,8 +130,9 @@ def write_run_artifact_bundle(
         "notes": notes,
         "files": {name: str(path) for name, path in files.items()},
     }
+    if metadata:
+        manifest["metadata"] = metadata
     manifest_path = root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     return ArtifactBundle(run_id=run_id, root=root, manifest_path=manifest_path, files=files)
-

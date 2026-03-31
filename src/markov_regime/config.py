@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-Interval = Literal["1hour", "1day"]
+Interval = Literal["1hour", "4hour", "1day"]
 
 
 @dataclass(frozen=True)
 class DataConfig:
     symbol: str = "BTCUSD"
-    interval: Interval = "1hour"
+    interval: Interval = "4hour"
     limit: int = 2500
     start: str | None = None
     end: str | None = None
@@ -63,6 +63,38 @@ class SweepConfig:
 
 
 def bars_per_year(interval: Interval) -> int:
+    # This project is now crypto-first, so annualization assumes 24/7 bars.
     if interval == "1day":
-        return 252
-    return 252 * 6
+        return 365
+    if interval == "4hour":
+        return 365 * 6
+    return 365 * 24
+
+
+def default_walk_forward_config(interval: Interval) -> WalkForwardConfig:
+    if interval == "4hour":
+        return WalkForwardConfig(
+            train_bars=420,
+            purge_bars=2,
+            validate_bars=84,
+            embargo_bars=2,
+            test_bars=84,
+            refit_stride_bars=84,
+        )
+    if interval == "1day":
+        return WalkForwardConfig(
+            train_bars=360,
+            purge_bars=1,
+            validate_bars=63,
+            embargo_bars=1,
+            test_bars=63,
+            refit_stride_bars=63,
+        )
+    return WalkForwardConfig(
+        train_bars=720,
+        purge_bars=6,
+        validate_bars=120,
+        embargo_bars=6,
+        test_bars=120,
+        refit_stride_bars=120,
+    )

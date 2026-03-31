@@ -34,7 +34,7 @@ def run_multi_asset_robustness(
     for symbol in symbols:
         try:
             fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
-            feature_frame = build_feature_frame(fetched.frame)
+            feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
             effective_walk_config, was_adjusted = (
                 suggest_walk_forward_config(len(feature_frame), walk_config)
                 if auto_adjust_windows

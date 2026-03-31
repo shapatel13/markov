@@ -153,6 +153,85 @@ def plot_robustness_results(robustness: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def plot_timeframe_comparison(timeframes: pd.DataFrame) -> go.Figure:
+    if timeframes.empty or "status" not in timeframes.columns:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Timeframe Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No timeframe comparison available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    ok_rows = timeframes.loc[timeframes["status"] == "ok"].copy()
+    if ok_rows.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Timeframe Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No successful timeframe runs", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    interval_order = {"4hour": 0, "1day": 1, "1hour": 2}
+    ok_rows = ok_rows.sort_values(
+        by="interval",
+        key=lambda values: values.map(lambda item: interval_order.get(str(item), len(interval_order))),
+        kind="stable",
+    )
+
+    figure = go.Figure()
+    figure.add_trace(go.Bar(x=ok_rows["interval"], y=ok_rows["stability_score"], name="Stability"))
+    figure.add_trace(go.Scatter(x=ok_rows["interval"], y=ok_rows["sharpe"], mode="lines+markers", name="Sharpe", yaxis="y2"))
+    figure.update_layout(
+        title="Timeframe Comparison",
+        template="plotly_white",
+        yaxis=dict(title="Stability"),
+        yaxis2=dict(title="Sharpe", overlaying="y", side="right"),
+        xaxis=dict(title="Interval"),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return figure
+
+
+def plot_feature_pack_comparison(feature_comparison: pd.DataFrame) -> go.Figure:
+    if feature_comparison.empty or "status" not in feature_comparison.columns:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Feature Pack Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No feature comparison available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    ok_rows = feature_comparison.loc[feature_comparison["status"] == "ok"].copy()
+    if ok_rows.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Feature Pack Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No successful feature-pack runs", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    figure = go.Figure()
+    figure.add_trace(go.Bar(x=ok_rows["feature_pack"], y=ok_rows["stability_score"], name="Stability"))
+    figure.add_trace(go.Scatter(x=ok_rows["feature_pack"], y=ok_rows["sharpe"], mode="lines+markers", name="Sharpe", yaxis="y2"))
+    figure.update_layout(
+        title="Feature Pack Comparison",
+        template="plotly_white",
+        yaxis=dict(title="Stability"),
+        yaxis2=dict(title="Sharpe", overlaying="y", side="right"),
+        xaxis=dict(title="Feature Pack"),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return figure
+
+
 def sensitivity_aggregate(sweep_results: pd.DataFrame, parameter: str, metric: str) -> pd.DataFrame:
     aggregated = (
         sweep_results.groupby(parameter, as_index=False)[metric]
