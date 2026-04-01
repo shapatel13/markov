@@ -70,6 +70,9 @@ def write_run_artifact_bundle(
     metadata: dict[str, Any] | None = None,
     timeframe_comparison: pd.DataFrame | None = None,
     feature_pack_comparison: pd.DataFrame | None = None,
+    consensus_members: pd.DataFrame | None = None,
+    consensus_timeline: pd.DataFrame | None = None,
+    consensus_summary: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -100,6 +103,12 @@ def write_run_artifact_bundle(
         files["timeframe_comparison_csv"] = _write_table(timeframe_comparison, root / "timeframe_comparison.csv")
     if feature_pack_comparison is not None and not feature_pack_comparison.empty:
         files["feature_pack_comparison_csv"] = _write_table(feature_pack_comparison, root / "feature_pack_comparison.csv")
+    if consensus_members is not None and not consensus_members.empty:
+        files["consensus_members_csv"] = _write_table(consensus_members, root / "consensus_members.csv")
+    if consensus_timeline is not None and not consensus_timeline.empty:
+        files["consensus_timeline_csv"] = _write_table(consensus_timeline, root / "consensus_timeline.csv")
+    if consensus_summary is not None and not consensus_summary.empty:
+        files["consensus_summary_csv"] = _write_table(consensus_summary, root / "consensus_summary.csv")
 
     manifest = {
         "schema_version": 2,

@@ -8,6 +8,7 @@ import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.consensus import build_consensus_timeline, summarize_consensus
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
 from markov_regime.data import normalize_symbol
@@ -24,6 +25,7 @@ from markov_regime.research import (
     _fold_consistency_metrics,
     ensure_results_tsv,
     load_research_program,
+    nested_holdout_evaluation,
     run_feature_pack_comparison,
     write_research_program,
 )
@@ -575,6 +577,81 @@ def test_fold_consistency_metrics_split_early_and_late_folds() -> None:
     assert metrics["selection_sharpe"] == 0.75
     assert metrics["confirmation_sharpe"] == -0.5
     assert metrics["fold_consistency_gap"] == 1.25
+
+
+def test_consensus_timeline_computes_majority_votes() -> None:
+    member_predictions = {
+        "a": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [1, 1, 0],
+                "candidate_action": [1, 0, 0],
+            }
+        ),
+        "b": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [1, 0, 0],
+                "candidate_action": [1, -1, 0],
+            }
+        ),
+        "c": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [0, 0, 0],
+                "candidate_action": [0, 0, 0],
+            }
+        ),
+    }
+
+    timeline = build_consensus_timeline(member_predictions)
+    summary = summarize_consensus(pd.DataFrame([{"sharpe": 1.0, "stability_score": 0.8}, {"sharpe": 0.5, "stability_score": 0.6}, {"sharpe": -0.2, "stability_score": 0.4}]), timeline)
+
+    assert timeline["position_consensus"].tolist() == [1, 0, 0]
+    assert timeline["candidate_consensus"].tolist() == [1, 0, 0]
+    assert timeline["position_consensus_share"].tolist()[0] == 2 / 3
+    assert not summary.empty
+    assert "Latest Held Consensus" in set(summary["metric"])
+
+
+def test_nested_holdout_evaluation_returns_outer_metrics() -> None:
+    frame = _signal_input_frame([0.9] * 15)
+    frame["fold_id"] = [0] * 5 + [1] * 5 + [2] * 5
+    state_actions = pd.DataFrame(
+        [
+            {
+                "canonical_state": 0,
+                "action": 1,
+                "label": "risk_on",
+                "validation_edge": 0.02,
+                "score_lower": 0.015,
+                "score_upper": 0.03,
+                "consistent_horizons": 3,
+                "samples": 50,
+                "avg_confidence": 0.8,
+            }
+        ]
+    )
+    predictions = attach_state_action_columns(
+        apply_trading_rules(frame, state_actions, StrategyConfig(required_confirmations=1)),
+        state_actions,
+        1,
+    )
+
+    nested = nested_holdout_evaluation(
+        predictions=predictions,
+        n_states=1,
+        base_config=StrategyConfig(required_confirmations=1),
+        interval="1hour",
+        outer_holdout_folds=1,
+    )
+
+    assert nested["status"] == "ok"
+    assert nested["outer_holdout_folds"] == 1.0
+    assert {"outer_holdout_sharpe", "selected_inner_posterior_threshold", "selected_inner_required_confirmations"}.issubset(nested)
 
 
 def test_feature_pack_comparison_runs_on_synthetic_prices(synthetic_prices: pd.DataFrame) -> None:

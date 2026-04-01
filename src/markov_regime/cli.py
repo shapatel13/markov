@@ -4,6 +4,7 @@ import argparse
 from dataclasses import replace
 
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
+from markov_regime.consensus import run_consensus_diagnostics
 from markov_regime.config import (
     DataConfig,
     ModelConfig,
@@ -145,6 +146,9 @@ def main() -> None:
     feature_parser = subparsers.add_parser("compare-feature-packs", help="Compare feature packs on the same symbol/timeframe")
     _common_parser(feature_parser)
 
+    consensus_parser = subparsers.add_parser("consensus", help="Run nearby-state and multi-seed consensus diagnostics")
+    _common_parser(consensus_parser)
+
     init_research_parser = subparsers.add_parser("init-research", help="Create a local research program and results TSV")
     init_research_parser.add_argument("--program", default="research_program.md")
     init_research_parser.add_argument("--results", default="results.tsv")
@@ -211,6 +215,22 @@ def main() -> None:
             auto_adjust_windows=not args.strict_windows,
         )
         print(feature_results.to_string(index=False))
+        return
+
+    if args.command == "consensus":
+        consensus = run_consensus_diagnostics(
+            symbol=data_config.symbol,
+            interval=data_config.interval,
+            limit=data_config.limit,
+            feature_columns=feature_columns,
+            model_config=model_config,
+            strategy_config=strategy_config,
+            auto_adjust_windows=not args.strict_windows,
+        )
+        print("Summary")
+        print(consensus.summary.to_string(index=False))
+        print("\nMembers")
+        print(consensus.members.to_string(index=False))
         return
 
     exported = export_signal_report(result.predictions, symbol=data_config.symbol, interval=data_config.interval)
