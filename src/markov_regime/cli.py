@@ -45,6 +45,7 @@ def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
 def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--symbol", default="BTCUSD")
     parser.add_argument("--interval", choices=["4hour", "1day", "1hour"], default=DEFAULT_CLI_INTERVAL)
+    parser.add_argument("--source", choices=["yahoo", "fmp"], default="yahoo")
     parser.add_argument("--feature-pack", choices=list(list_feature_packs()), default="trend")
     parser.add_argument("--states", type=int, default=6)
     parser.add_argument("--limit", type=int, default=5000)
@@ -63,15 +64,15 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--require-consensus-confirmation", action="store_true", help="Only execute exposure when nearby seeds and state counts agree.")
     parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="hard", help="How weak consensus should be handled when the consensus filter is enabled.")
     parser.add_argument("--consensus-min-share", type=float, default=0.67, help="Minimum consensus agreement share required before a trade is allowed.")
-    parser.add_argument("--cost-bps", type=float, default=2.0)
+    parser.add_argument("--cost-bps", type=float, default=10.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
-    parser.add_argument("--slippage-bps", type=float, default=3.0)
+    parser.add_argument("--slippage-bps", type=float, default=5.0)
     parser.add_argument("--impact-bps", type=float, default=2.0)
     parser.add_argument("--strict-windows", action="store_true", help="Fail instead of auto-sizing walk-forward windows.")
 
 
 def _load_result(args: argparse.Namespace):
-    data_config = DataConfig(symbol=args.symbol, interval=args.interval, limit=args.limit)
+    data_config = DataConfig(symbol=args.symbol, interval=args.interval, source=args.source, limit=args.limit)
     model_config = ModelConfig(n_states=args.states)
     feature_columns = get_feature_columns(args.feature_pack)
     walk_config = _resolve_cli_walk_config(args)
@@ -107,7 +108,7 @@ def _load_result(args: argparse.Namespace):
         strategy_config=replace(strategy_config, require_daily_confirmation=False),
     )
     if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
-        confirmation_config = DataConfig(symbol=args.symbol, interval="1day", limit=args.limit)
+        confirmation_config = DataConfig(symbol=args.symbol, interval="1day", source=args.source, limit=args.limit)
         confirmation_fetched = fetch_price_data(confirmation_config)
         confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
         confirmation_walk_config = (
@@ -134,6 +135,7 @@ def _load_result(args: argparse.Namespace):
         consensus = run_consensus_diagnostics(
             symbol=data_config.symbol,
             interval=data_config.interval,
+            source=data_config.source,
             limit=data_config.limit,
             feature_columns=feature_columns,
             model_config=model_config,
@@ -218,6 +220,7 @@ def main() -> None:
             limit=data_config.limit,
             model_config=model_config,
             strategy_config=strategy_config,
+            source=data_config.source,
             feature_pack=args.feature_pack,
             feature_columns=feature_columns,
             auto_adjust_windows=not args.strict_windows,
@@ -234,6 +237,7 @@ def main() -> None:
             strategy_config=strategy_config,
             symbol=data_config.symbol,
             limit=data_config.limit,
+            source=data_config.source,
             auto_adjust_windows=not args.strict_windows,
         )
         print(feature_results.to_string(index=False))
@@ -243,6 +247,7 @@ def main() -> None:
         consensus = run_consensus_diagnostics(
             symbol=data_config.symbol,
             interval=data_config.interval,
+            source=data_config.source,
             limit=data_config.limit,
             feature_columns=feature_columns,
             model_config=model_config,

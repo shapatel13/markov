@@ -193,16 +193,17 @@ def _fetch_feature_context(
     *,
     symbol: str,
     interval: Interval,
+    source: str,
     feature_columns: tuple[str, ...],
     limit: int,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
 ) -> tuple[DataFetchResult, pd.DataFrame]:
-    key = (symbol, interval, limit, feature_columns)
+    key = (symbol, interval, source, limit, feature_columns)
     cached = cache.get(key)
     if cached is not None:
         return cached
 
-    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
+    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, source=source, limit=limit))
     feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
     cache[key] = (fetched, feature_frame)
     return fetched, feature_frame
@@ -228,8 +229,9 @@ def _maybe_apply_daily_confirmation(
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
     interval: Interval,
+    source: str,
 ):
     if interval != "4hour" or not strategy_config.require_daily_confirmation:
         return result
@@ -238,6 +240,7 @@ def _maybe_apply_daily_confirmation(
     _, confirmation_features = _fetch_feature_context(
         symbol=symbol,
         interval="1day",
+        source=source,
         feature_columns=feature_columns,
         limit=limit,
         cache=cache,
@@ -395,19 +398,21 @@ def run_timeframe_comparison(
     limit: int,
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
+    source: str = "yahoo",
     feature_pack: str = "baseline",
     feature_columns: tuple[str, ...] = FEATURE_COLUMNS,
     auto_adjust_windows: bool = True,
     intervals: tuple[Interval, ...] = DEFAULT_RESEARCH_INTERVALS,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
 
     for interval in intervals:
         try:
             fetched, feature_frame = _fetch_feature_context(
                 symbol=symbol,
                 interval=interval,
+                source=source,
                 feature_columns=feature_columns,
                 limit=limit,
                 cache=cache,
@@ -431,6 +436,7 @@ def run_timeframe_comparison(
                 auto_adjust_windows=auto_adjust_windows,
                 cache=cache,
                 interval=interval,
+                source=source,
             )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             rows.append(
@@ -484,12 +490,13 @@ def run_feature_pack_comparison(
     strategy_config: StrategyConfig,
     symbol: str | None = None,
     limit: int | None = None,
+    source: str = "yahoo",
     feature_packs: tuple[str, ...] | None = None,
     auto_adjust_windows: bool = True,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     selected_packs = feature_packs or list_feature_packs()
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
 
     for feature_pack in selected_packs:
         feature_columns = get_feature_columns(feature_pack)
@@ -515,6 +522,7 @@ def run_feature_pack_comparison(
                     auto_adjust_windows=auto_adjust_windows,
                     cache=cache,
                     interval=interval,
+                    source=source,
                 )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             consistency = _fold_consistency_metrics(result)
@@ -677,7 +685,7 @@ def run_autoresearch(
     results_path: str | Path = "results.tsv",
 ) -> pd.DataFrame:
     ensure_results_tsv(results_path)
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
     rows: list[dict[str, object]] = []
     contexts: dict[str, dict[str, object]] = {}
     created_at = pd.Timestamp.utcnow()
@@ -690,6 +698,7 @@ def run_autoresearch(
             fetched, feature_frame = _fetch_feature_context(
                 symbol=program.symbol,
                 interval=interval,
+                source="yahoo",
                 feature_columns=candidate_feature_columns,
                 limit=program.limit,
                 cache=cache,
@@ -718,6 +727,7 @@ def run_autoresearch(
                     robust_fetched, robust_features = _fetch_feature_context(
                         symbol=robust_symbol,
                         interval=interval,
+                        source="yahoo",
                         feature_columns=candidate_feature_columns,
                         limit=program.limit,
                         cache=cache,

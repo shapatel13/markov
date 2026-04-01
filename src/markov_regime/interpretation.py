@@ -9,8 +9,9 @@ from markov_regime.config import Interval, StrategyConfig, WalkForwardConfig
 POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
-    "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline.",
-    "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
+    "data_source": "Price source for the research run. `yahoo` is now the default ingestion path for the local app. `fmp` remains available if you want to compare vendor behavior.",
+    "interval": "Primary research timeframe. Defaults now assume roughly 12 months of training and 3 months each of validation and blind testing per fold.",
+    "feature_pack": "Chooses what market features the HMM sees. The new `atr_causal` pack uses ATR-scaled momentum plus causal low-pass filters to avoid future leakage.",
     "limit": "How many vendor bars to fetch. More history usually makes walk-forward conclusions less fragile.",
     "states": "Number of HMM regimes. Too few can blur distinct behavior; too many can over-segment noise.",
     "train_bars": "Bars used to fit each rolling HMM. Larger windows are steadier but slower to adapt.",
@@ -28,7 +29,7 @@ CONTROL_HELP: dict[str, str] = {
     "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
     "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
     "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue.",
-    "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
+    "cost_bps": "Trading fee assumption in basis points. Default is now 10 bps (0.10%) before spread and slippage so crypto backtests stay more conservative.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
     "impact_bps": "Liquidity impact penalty in basis points. Higher values stress strategies that need more urgent execution.",
@@ -63,8 +64,8 @@ def _duration_label(interval: Interval, bars: int) -> str:
 
 def _sample_band(interval: Interval, available_rows: int) -> str:
     thresholds = {
-        "1hour": (1500, 4000),
-        "4hour": (700, 1500),
+        "1hour": (10_000, 16_000),
+        "4hour": (3_200, 4_200),
         "1day": (500, 1200),
     }
     thin, deeper = thresholds[interval]
@@ -550,11 +551,11 @@ def build_control_interpretation_rows(
     total_friction = strategy_config.cost_bps + strategy_config.spread_bps + strategy_config.slippage_bps + strategy_config.impact_bps
 
     if interval == "4hour":
-        interval_text = "Primary higher-timeframe trading lane. Usually a good balance between stability and responsiveness for BTC."
+        interval_text = "Primary higher-timeframe trading lane. The default walk-forward now approximates 12 months of training followed by 3-month validation and 3-month blind testing."
     elif interval == "1day":
-        interval_text = "Slower swing lane. Cleaner regimes, but fewer samples and slower reactions."
+        interval_text = "Slower swing lane. Cleaner regimes, better for medium-term context, and naturally aligned with the stricter 12M/3M research protocol."
     else:
-        interval_text = "Fast baseline lane. Useful for comparison, but more vulnerable to noise and overtrading."
+        interval_text = "Fast baseline lane. Useful for comparison, but more vulnerable to noise and overtrading even under stricter 12M/3M windows."
 
     if strategy_config.posterior_threshold >= 0.75:
         posterior_text = "Strict. It will reject many bars unless the state assignment is very clean."
@@ -593,7 +594,7 @@ def build_control_interpretation_rows(
     else:
         gap_text = "Loose separation filter. More trades, but more ambiguity."
 
-    if total_friction >= 15:
+    if total_friction >= 20:
         friction_text = "Heavy friction assumption. Good for stress testing whether the edge survives realistic costs."
     elif total_friction >= 8:
         friction_text = "Moderate friction assumption."

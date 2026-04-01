@@ -4,9 +4,10 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 
 ## What It Does
 
-- Fetches daily or hourly bars from Financial Modeling Prep and locally resamples complete `4hour` candles from hourly data.
-- Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, and realized skew/kurtosis structure.
+- Fetches daily or hourly bars from Yahoo Finance by default, with optional FMP support, and locally resamples complete `4hour` candles from hourly data.
+- Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, Donchian breakout context, rolling VWAP gap, realized skew/kurtosis structure, and a causal ATR-scaled momentum pack built from past-only low-pass filters.
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
+- Defaults to a stricter `12 months train / 3 months validate / 3 months blind test` walk-forward structure per fold, with stitched performance coming only from the blind test slices.
 - Compares 5 through 9 HMM states side by side.
 - Compares `4hour`, `1day`, and `1hour` operating modes so higher-timeframe trades can be judged against both the slower swing lane and the noisier intraday baseline.
 - Supports an optional `4hour` execution filter that only blocks trades when the daily lane clearly disagrees, while allowing neutral daily bars to pass through without adding conviction.
@@ -30,7 +31,9 @@ python -m pip install --upgrade pip
 python -m pip install -e .[dev]
 ```
 
-2. Add your FMP API key to `.env`.
+2. Yahoo Finance is now the default data source, so no API key is required for the default local app flow.
+
+Optional: add your FMP API key to `.env` if you want to compare against FMP later.
 
 ```text
 FMP_API_KEY=your_key_here
@@ -110,11 +113,15 @@ python -m streamlit run app.py
 ## Methodology Notes
 
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
+- Displayed performance stitches only the blind out-of-sample test windows. Training and validation returns are never included in the equity curve or headline metrics.
+- The default walk-forward protocol now targets roughly `12 months train / 3 months validate / 3 months blind test` on each timeframe, with auto-shrinking available only as an explicit fallback when the sample is too short.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
 - The optional daily confirmation filter acts as an execution veto, not a second alpha model. Daily neutrality is allowed; clear daily opposition blocks the `4hour` trade.
 - State labels are re-aligned after every refit because raw HMM state IDs are not stable.
 - Directional actions come from validation-window forward returns, not the in-sample training fit.
 - The strategy prefers flat exposure when posterior confidence is marginal or when validation support is weak.
+- Default cost assumptions are now intentionally conservative for crypto: `10 bps` fee plus spread, slippage, and liquidity impact.
+- The `atr_causal` feature pack uses `scipy.signal.lfilter`-based low-pass features rather than symmetric filters such as `filtfilt`, which would leak future information.
 - Major metrics are paired with moving block bootstrap confidence intervals to avoid treating a single backtest path as definitive.
 - Every app run writes a local artifact bundle in `artifacts/` with the config snapshot, manifest, model tables, robustness table, and signal report.
 - The displayed strategy performance is now compared against buy-and-hold on the same test slices.
@@ -150,8 +157,10 @@ python -m streamlit run app.py
 - Small validation windows can make state-to-action mappings noisy, especially for infrequent states.
 - State-count selection matters: if 5-9 states produce materially different results, the regime story is fragile.
 - Backtest quality can deteriorate quickly once transaction costs, slippage, or stale fills are introduced.
+- Any symmetric filter that touches future bars, such as `filtfilt`, will hallucinate returns. Causal filters only.
 - Even the richer friction model is still an approximation; it is not a substitute for exchange-specific order book replay or venue-level fill data.
 - The `4hour` candles are aggregated locally from hourly API data, so missing hourly bars or late prints can distort the higher-timeframe candle set.
+- Yahoo intraday history is finite, so very long intraday walk-forward runs may auto-shrink or fail unless you choose a slower timeframe or a different provider.
 - Annualization is crypto-first and assumes 24/7 bars; if you use equity symbols, annualized metrics are only approximate unless you adapt the calendar assumptions.
 - Bootstrap intervals may still understate uncertainty during structural breaks because the future may not resemble any resampled past block.
 - Forward-return tables can look attractive when a regime occurs rarely; sample count should always be read with the mean.

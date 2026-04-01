@@ -274,6 +274,8 @@ def run_walk_forward(
         signal_frame["validate_end_time"] = validate_frame["timestamp"].iloc[-1]
         signal_frame["test_start_time"] = test_frame["timestamp"].iloc[0]
         signal_frame["test_end_time"] = test_frame["timestamp"].iloc[-1]
+        signal_frame["oos_segment"] = "test"
+        signal_frame["is_blind_oos"] = True
         prediction_frames.append(signal_frame)
 
         fold_metrics = compute_metrics(signal_frame, interval)

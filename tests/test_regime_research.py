@@ -18,9 +18,9 @@ from markov_regime.consensus import (
 )
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
-from markov_regime.data import normalize_symbol
+from markov_regime.data import normalize_symbol, provider_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
-from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, _causal_low_pass, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
     build_control_interpretation_rows,
     build_metric_interpretation_rows,
@@ -148,6 +148,7 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
         "regime_mix_v2",
         "trend_context",
         "regime_context",
+        "atr_causal",
     }.issubset(set(list_feature_packs()))
 
     trend_columns = get_feature_columns("trend")
@@ -162,6 +163,8 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
     trend_context_frame = build_feature_frame(synthetic_prices, feature_columns=trend_context_columns)
     regime_context_columns = get_feature_columns("regime_context")
     regime_context_frame = build_feature_frame(synthetic_prices, feature_columns=regime_context_columns)
+    atr_causal_columns = get_feature_columns("atr_causal")
+    atr_causal_frame = build_feature_frame(synthetic_prices, feature_columns=atr_causal_columns)
 
     assert "ema_gap_24" in trend_columns
     assert "adx_14" in trend_strength_columns
@@ -169,12 +172,14 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
     assert "parkinson_vol_24" in vol_surface_columns
     assert "daily_trend_20" in trend_context_columns
     assert "daily_adx_14" in regime_context_columns
+    assert "atr_scaled_momentum_24" in atr_causal_columns
     assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
     assert trend_strength_frame.loc[:, list(trend_strength_columns)].isna().sum().sum() == 0
     assert mean_reversion_frame.loc[:, list(mean_reversion_columns)].isna().sum().sum() == 0
     assert vol_surface_frame.loc[:, list(vol_surface_columns)].isna().sum().sum() == 0
     assert trend_context_frame.loc[:, list(trend_context_columns)].isna().sum().sum() == 0
     assert regime_context_frame.loc[:, list(regime_context_columns)].isna().sum().sum() == 0
+    assert atr_causal_frame.loc[:, list(atr_causal_columns)].isna().sum().sum() == 0
 
 
 def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.DataFrame) -> None:
@@ -201,6 +206,11 @@ def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.Da
         "daily_adx_14",
         "daily_di_spread_14",
         "daily_range_ratio_10",
+        "causal_lp_gap_12_48",
+        "causal_lp_slope_12",
+        "causal_lp_gap_24_72",
+        "atr_scaled_momentum_12",
+        "atr_scaled_momentum_24",
     )
     frame = build_feature_frame(synthetic_prices, feature_columns=advanced_columns)
 
@@ -212,6 +222,19 @@ def test_normalize_symbol_maps_common_crypto_aliases() -> None:
     assert normalize_symbol("BTC") == "BTCUSD"
     assert normalize_symbol("btc-usd") == "BTCUSD"
     assert normalize_symbol("SPY") == "SPY"
+    assert provider_symbol("BTCUSD", "yahoo") == "BTC-USD"
+    assert provider_symbol("SPY", "yahoo") == "SPY"
+
+
+def test_causal_low_pass_is_not_affected_by_future_values() -> None:
+    base = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+    shocked = base.copy()
+    shocked.iloc[-1] = 1000.0
+
+    base_filtered = _causal_low_pass(base, span=4, poles=2)
+    shocked_filtered = _causal_low_pass(shocked, span=4, poles=2)
+
+    pd.testing.assert_series_equal(base_filtered.iloc[:-1], shocked_filtered.iloc[:-1])
 
 
 def test_redact_api_key_hides_secret_in_source_url() -> None:
@@ -532,11 +555,18 @@ def test_bars_per_year_supports_4hour_crypto_calendar() -> None:
 
 def test_default_walk_forward_config_prefers_higher_timeframe_windows() -> None:
     four_hour = default_walk_forward_config("4hour")
+    one_day = default_walk_forward_config("1day")
     one_hour = default_walk_forward_config("1hour")
 
     assert four_hour.train_bars < one_hour.train_bars
     assert four_hour.validate_bars < one_hour.validate_bars
     assert four_hour.test_bars < one_hour.test_bars
+    assert four_hour.train_bars == 365 * 6
+    assert four_hour.validate_bars == 90 * 6
+    assert four_hour.test_bars == 90 * 6
+    assert one_day.train_bars == 365
+    assert one_day.validate_bars == 90
+    assert one_day.test_bars == 90
 
 
 def test_research_program_round_trip(tmp_path: Path) -> None:
@@ -854,6 +884,8 @@ def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataF
     assert "sharpe" in result.metrics
     assert "trade_win_rate" in result.metrics
     assert "sharpe" in result.benchmark_metrics
+    assert result.predictions["is_blind_oos"].all()
+    assert set(result.predictions["oos_segment"]) == {"test"}
 
 
 def test_parse_symbol_list_handles_commas_and_spacing() -> None:
@@ -899,4 +931,5 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)
     assert manifest["metadata"]["feature_pack"] == "baseline"
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
+    assert manifest["methodology"]["stitched_performance_segment"] == "blind_test_only"

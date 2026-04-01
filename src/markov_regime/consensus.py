@@ -45,17 +45,18 @@ def _resolve_feature_context(
     *,
     symbol: str,
     interval: Interval,
+    source: str,
     limit: int,
     feature_columns: tuple[str, ...],
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
 ) -> tuple[DataFetchResult, pd.DataFrame, object, bool]:
-    key = (symbol, interval, limit, feature_columns)
+    key = (symbol, interval, source, limit, feature_columns)
     cached = cache.get(key)
     if cached is not None:
         return cached
 
-    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
+    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, source=source, limit=limit))
     feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
     walk_config, was_adjusted = (
         suggest_walk_forward_config(len(feature_frame), default_walk_forward_config(interval))
@@ -70,16 +71,18 @@ def _run_member(
     *,
     symbol: str,
     interval: Interval,
+    source: str,
     limit: int,
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
 ) -> tuple[WalkForwardResult, DataFetchResult, bool]:
     fetched, feature_frame, walk_config, was_adjusted = _resolve_feature_context(
         symbol=symbol,
         interval=interval,
+        source=source,
         limit=limit,
         feature_columns=feature_columns,
         auto_adjust_windows=auto_adjust_windows,
@@ -99,6 +102,7 @@ def _run_member(
         confirmation_fetched, confirmation_features, confirmation_walk_config, _ = _resolve_feature_context(
             symbol=symbol,
             interval="1day",
+            source=source,
             limit=limit,
             feature_columns=feature_columns,
             auto_adjust_windows=auto_adjust_windows,
@@ -546,6 +550,7 @@ def run_consensus_diagnostics(
     *,
     symbol: str,
     interval: Interval,
+    source: str = "yahoo",
     limit: int,
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
@@ -556,7 +561,7 @@ def run_consensus_diagnostics(
 ) -> ConsensusDiagnostics:
     seeds = seed_values or _default_seed_values(model_config.random_state)
     states = state_counts or _default_state_counts(model_config.n_states)
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]] = {}
+    cache: dict[tuple[str, Interval, str, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]] = {}
     member_rows: list[dict[str, object]] = []
     member_predictions: dict[str, pd.DataFrame] = {}
 
@@ -566,6 +571,7 @@ def run_consensus_diagnostics(
             result, fetched, was_adjusted = _run_member(
                 symbol=symbol,
                 interval=interval,
+                source=source,
                 limit=limit,
                 feature_columns=feature_columns,
                 model_config=member_model_config,

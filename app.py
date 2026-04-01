@@ -87,12 +87,13 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("BTC 4H preset with daily confirmation, walk-forward HMM diagnostics, explicit guardrails, and confidence intervals.")
+st.caption("BTC 4H preset with Yahoo-first data, 12M/3M-style walk-forward retraining, blind out-of-sample stitching, explicit guardrails, and conservative friction.")
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
     st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
     feature_pack_options = list(list_feature_packs())
+    data_source = st.selectbox("Data source", options=["yahoo", "fmp"], index=0, help=CONTROL_HELP["data_source"])
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
     default_walk = default_walk_forward_config(interval)
@@ -119,21 +120,21 @@ with st.sidebar.form("controls"):
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
     consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
-    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
+    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=10.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
-    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
+    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=5.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
     impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5, help=CONTROL_HELP["impact_bps"])
     robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
     run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
     run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
     run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
-    auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
+    auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=False)
     run_clicked = st.form_submit_button("Run Research")
 
 if run_clicked:
     try:
         with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
-            data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit))
+            data_config = DataConfig(symbol=symbol, interval=interval, source=data_source, limit=int(limit))
             model_config = ModelConfig(n_states=selected_states)
             feature_columns = get_feature_columns(feature_pack)
             requested_walk_config = WalkForwardConfig(
@@ -179,7 +180,7 @@ if run_clicked:
             confirmation_fetched = None
             confirmation_result = None
             if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
-                confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=int(limit))
+                confirmation_data_config = DataConfig(symbol=symbol, interval="1day", source=data_source, limit=int(limit))
                 confirmation_fetched = fetch_price_data(confirmation_data_config)
                 confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
                 confirmation_walk_config, _ = (
@@ -218,6 +219,7 @@ if run_clicked:
             robustness = run_multi_asset_robustness(
                 symbols=parse_symbol_list(robustness_symbols),
                 interval=data_config.interval,
+                source=data_config.source,
                 limit=int(limit),
                 feature_columns=feature_columns,
                 model_config=model_config,
@@ -231,6 +233,7 @@ if run_clicked:
                     limit=int(limit),
                     model_config=model_config,
                     strategy_config=execution_strategy_config,
+                    source=data_config.source,
                     feature_pack=feature_pack,
                     feature_columns=feature_columns,
                     auto_adjust_windows=auto_adjust_windows,
@@ -246,6 +249,7 @@ if run_clicked:
                     strategy_config=execution_strategy_config,
                     symbol=symbol,
                     limit=int(limit),
+                    source=data_config.source,
                     auto_adjust_windows=auto_adjust_windows,
                 )
                 if run_feature_pack_check
@@ -256,6 +260,7 @@ if run_clicked:
                 run_consensus_diagnostics(
                     symbol=symbol,
                     interval=data_config.interval,
+                    source=data_config.source,
                     limit=int(limit),
                     feature_columns=feature_columns,
                     model_config=model_config,
@@ -324,6 +329,7 @@ if run_clicked:
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
+                "source_provider": fetched.source_provider,
                 "interval": interval,
                 "data_config": data_config,
                 "model_config": model_config,
@@ -434,7 +440,8 @@ if analysis["confirmation_enabled"]:
     st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
 if analysis["strategy_config"].require_consensus_confirmation:
     st.caption("Consensus Filter shows whether nearby seeds and state counts agree strongly enough with the current direction to allow exposure.")
-st.caption(f"Latest guardrail status: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+st.caption("All summary metrics and equity curves are stitched only from blind test windows. Training and validation slices are never included in performance totals.")
+st.caption(f"Latest guardrail status: `{guardrail_text}` | Data provider: `{analysis['source_provider']}` | Data request: `{analysis['data_url']}`")
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
     st.caption(f"Daily confirmation source: `{analysis['confirmation_data_url']}`")
 st.caption(f"Feature pack: `{analysis['feature_pack']}`")

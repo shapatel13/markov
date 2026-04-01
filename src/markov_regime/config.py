@@ -5,12 +5,14 @@ from typing import Literal
 
 Interval = Literal["1hour", "4hour", "1day"]
 ConsensusGateMode = Literal["hard", "entry_only"]
+DataSource = Literal["yahoo", "fmp"]
 
 
 @dataclass(frozen=True)
 class DataConfig:
     symbol: str = "BTCUSD"
     interval: Interval = "4hour"
+    source: DataSource = "yahoo"
     limit: int = 2500
     start: str | None = None
     end: str | None = None
@@ -53,9 +55,9 @@ class StrategyConfig:
     validation_shrinkage: float = 30.0
     min_consistent_horizons: int = 2
     allow_short: bool = False
-    cost_bps: float = 2.0
+    cost_bps: float = 10.0
     spread_bps: float = 4.0
-    slippage_bps: float = 3.0
+    slippage_bps: float = 5.0
     impact_bps: float = 2.0
     range_impact_weight: float = 0.15
     volume_reference: float = 1_000_000.0
@@ -82,27 +84,27 @@ def bars_per_year(interval: Interval) -> int:
 def default_walk_forward_config(interval: Interval) -> WalkForwardConfig:
     if interval == "4hour":
         return WalkForwardConfig(
-            train_bars=420,
-            purge_bars=2,
-            validate_bars=84,
-            embargo_bars=2,
-            test_bars=84,
-            refit_stride_bars=84,
+            train_bars=365 * 6,
+            purge_bars=6,
+            validate_bars=90 * 6,
+            embargo_bars=6,
+            test_bars=90 * 6,
+            refit_stride_bars=90 * 6,
         )
     if interval == "1day":
         return WalkForwardConfig(
-            train_bars=360,
-            purge_bars=1,
-            validate_bars=63,
-            embargo_bars=1,
-            test_bars=63,
-            refit_stride_bars=63,
+            train_bars=365,
+            purge_bars=2,
+            validate_bars=90,
+            embargo_bars=2,
+            test_bars=90,
+            refit_stride_bars=90,
         )
     return WalkForwardConfig(
-        train_bars=720,
-        purge_bars=6,
-        validate_bars=120,
-        embargo_bars=6,
-        test_bars=120,
-        refit_stride_bars=120,
+        train_bars=365 * 24,
+        purge_bars=24,
+        validate_bars=90 * 24,
+        embargo_bars=24,
+        test_bars=90 * 24,
+        refit_stride_bars=90 * 24,
     )

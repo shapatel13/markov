@@ -118,7 +118,7 @@ def write_run_artifact_bundle(
         files["consensus_mode_comparison_csv"] = _write_table(consensus_mode_comparison, root / "consensus_mode_comparison.csv")
 
     manifest = {
-        "schema_version": 4,
+        "schema_version": 5,
         "run_id": run_id,
         "created_at_utc": created_at.isoformat(),
         "symbol": symbol,
@@ -142,6 +142,11 @@ def write_run_artifact_bundle(
             "feature_end": str(pd.to_datetime(feature_frame["timestamp"].iloc[-1])),
             "raw_fingerprint": _frame_fingerprint(raw_frame),
             "feature_fingerprint": _frame_fingerprint(feature_frame),
+        },
+        "methodology": {
+            "walk_forward_protocol": "rolling_train_validate_test",
+            "stitched_performance_segment": "blind_test_only",
+            "predictions_all_blind_oos": bool(selected_result.predictions.get("is_blind_oos", pd.Series(dtype=bool)).fillna(False).all()),
         },
         "selected_result": {
             "n_states": selected_result.n_states,

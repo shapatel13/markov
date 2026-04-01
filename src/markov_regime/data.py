@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -10,7 +11,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from markov_regime.config import DataConfig
+from markov_regime.config import DataConfig, DataSource
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class DataFetchResult:
     source_url: str
     requested_symbol: str
     resolved_symbol: str
+    source_provider: DataSource
 
 
 CRYPTO_ALIASES: dict[str, str] = {
@@ -56,6 +58,15 @@ def normalize_symbol(symbol: str) -> str:
     return CRYPTO_ALIASES.get(cleaned, cleaned)
 
 
+def provider_symbol(symbol: str, source: DataSource) -> str:
+    canonical = normalize_symbol(symbol)
+    if source == "fmp":
+        return canonical
+    if canonical.endswith("USD") and canonical[:-3].isalpha():
+        return f"{canonical[:-3]}-USD"
+    return canonical
+
+
 def _hourly_url(symbol: str) -> str:
     return "https://financialmodelingprep.com/stable/historical-chart/1hour"
 
@@ -72,7 +83,7 @@ def _legacy_daily_url(symbol: str) -> str:
     return f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}"
 
 
-def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
+def _normalize_fmp_frame(payload: Any, interval: str) -> pd.DataFrame:
     if interval == "1day" and isinstance(payload, dict):
         records = payload.get("historical", [])
     else:
@@ -104,6 +115,50 @@ def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
     return normalized
 
 
+def _normalize_yahoo_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        raise ValueError("No price data returned from Yahoo Finance.")
+
+    normalized = frame.copy()
+    if isinstance(normalized.columns, pd.MultiIndex):
+        normalized.columns = [str(levels[0]) for levels in normalized.columns]
+    normalized = normalized.reset_index()
+    timestamp_column = "Datetime" if "Datetime" in normalized.columns else "Date"
+    if timestamp_column not in normalized.columns:
+        raise ValueError("Yahoo Finance payload is missing a timestamp column.")
+
+    required = ["Open", "High", "Low", "Close"]
+    missing = [column for column in required if column not in normalized.columns]
+    if missing:
+        raise ValueError(f"Yahoo Finance payload is missing required columns: {missing}")
+
+    if "Volume" not in normalized.columns:
+        normalized["Volume"] = 0.0
+
+    timestamps = pd.to_datetime(normalized[timestamp_column], utc=False)
+    if getattr(timestamps.dt, "tz", None) is not None:
+        timestamps = timestamps.dt.tz_convert(None)
+
+    return (
+        normalized.loc[:, [timestamp_column, "Open", "High", "Low", "Close", "Volume"]]
+        .rename(
+            columns={
+                timestamp_column: "timestamp",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            }
+        )
+        .assign(timestamp=timestamps)
+        .sort_values("timestamp")
+        .dropna(subset=["open", "high", "low", "close"])
+        .drop_duplicates(subset="timestamp")
+        .reset_index(drop=True)
+    )
+
+
 def _redact_api_key(url: str) -> str:
     parts = urlsplit(url)
     query_items = parse_qsl(parts.query, keep_blank_values=True)
@@ -131,7 +186,59 @@ def _resample_ohlcv(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
     return complete
 
 
-def fetch_price_data(
+def _yahoo_period(config: DataConfig) -> str:
+    if config.interval == "1day":
+        return "max"
+    requested_hourly_bars = config.limit if config.interval == "1hour" else config.limit * 4
+    warmup_bars = max(24 * 120, requested_hourly_bars // 5)
+    requested_days = int(math.ceil((requested_hourly_bars + warmup_bars) / 24))
+    return f"{min(max(requested_days, 180), 730)}d"
+
+
+def _fetch_from_yahoo(config: DataConfig) -> DataFetchResult:
+    try:
+        import yfinance as yf
+    except ImportError as exc:  # pragma: no cover - depends on local environment
+        raise ValueError("Yahoo Finance support requires `yfinance`. Install dependencies with `python -m pip install -e .[dev]`.") from exc
+
+    resolved_symbol = normalize_symbol(config.symbol)
+    provider_ticker = provider_symbol(resolved_symbol, "yahoo")
+    fetch_interval = "1d" if config.interval == "1day" else "1h"
+    download_kwargs: dict[str, Any] = {
+        "tickers": provider_ticker,
+        "interval": fetch_interval,
+        "auto_adjust": False,
+        "progress": False,
+        "actions": False,
+        "threads": False,
+    }
+    if config.start or config.end:
+        if config.start:
+            download_kwargs["start"] = config.start
+        if config.end:
+            download_kwargs["end"] = config.end
+        range_hint = f"start={config.start or 'min'}&end={config.end or 'now'}"
+    else:
+        period = _yahoo_period(config)
+        download_kwargs["period"] = period
+        range_hint = f"period={period}"
+
+    payload = yf.download(**download_kwargs)
+    frame = _normalize_yahoo_frame(payload)
+    frame = _resample_ohlcv(frame, config.interval)
+    if config.limit > 0:
+        frame = frame.tail(config.limit).reset_index(drop=True)
+
+    return DataFetchResult(
+        frame=frame,
+        source_url=f"yfinance://{provider_ticker}?interval={fetch_interval}&{range_hint}",
+        requested_symbol=config.symbol,
+        resolved_symbol=resolved_symbol,
+        source_provider="yahoo",
+    )
+
+
+def _fetch_from_fmp(
     config: DataConfig,
     api_key: str | None = None,
     session: requests.Session | None = None,
@@ -144,7 +251,7 @@ def fetch_price_data(
         if config.interval == "1day"
         else [_hourly_url(resolved_symbol), _legacy_hourly_url(resolved_symbol)]
     )
-    params: dict[str, str] = {"apikey": key, "symbol": resolved_symbol}
+    params: dict[str, str] = {"apikey": key, "symbol": provider_symbol(resolved_symbol, "fmp")}
     if config.start:
         params["from"] = config.start
     if config.end:
@@ -168,7 +275,7 @@ def fetch_price_data(
     else:
         raise ValueError(f"Unable to fetch price data from Financial Modeling Prep: {last_error}") from last_error
 
-    frame = _normalize_frame(payload, config.interval)
+    frame = _normalize_fmp_frame(payload, config.interval)
     if config.start:
         frame = frame.loc[frame["timestamp"] >= pd.Timestamp(config.start)].copy()
     if config.end:
@@ -182,4 +289,15 @@ def fetch_price_data(
         source_url=_redact_api_key(response.url) if response else candidate_urls[0],
         requested_symbol=config.symbol,
         resolved_symbol=resolved_symbol,
+        source_provider="fmp",
     )
+
+
+def fetch_price_data(
+    config: DataConfig,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> DataFetchResult:
+    if config.source == "fmp":
+        return _fetch_from_fmp(config, api_key=api_key, session=session)
+    return _fetch_from_yahoo(config)

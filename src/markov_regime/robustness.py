@@ -24,6 +24,7 @@ def run_multi_asset_robustness(
     *,
     symbols: list[str],
     interval: Interval,
+    source: str = "yahoo",
     limit: int,
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
@@ -35,7 +36,7 @@ def run_multi_asset_robustness(
 
     for symbol in symbols:
         try:
-            fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
+            fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, source=source, limit=limit))
             feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
             effective_walk_config, was_adjusted = (
                 suggest_walk_forward_config(len(feature_frame), walk_config)
@@ -51,7 +52,7 @@ def run_multi_asset_robustness(
                 strategy_config=strategy_config,
             )
             if interval == "4hour" and strategy_config.require_daily_confirmation:
-                confirmation_fetched = fetch_price_data(DataConfig(symbol=symbol, interval="1day", limit=limit))
+                confirmation_fetched = fetch_price_data(DataConfig(symbol=symbol, interval="1day", source=source, limit=limit))
                 confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
                 requested_confirmation_walk = default_walk_forward_config("1day")
                 confirmation_walk_config, _ = (

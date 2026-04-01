@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.signal import lfilter
 
 FORWARD_HORIZONS: tuple[int, ...] = (1, 3, 6, 12, 24, 72)
 
@@ -145,6 +146,18 @@ FEATURE_PACKS: dict[str, tuple[str, ...]] = {
         "daily_range_ratio_10",
         "volume_z_24",
     ),
+    "atr_causal": (
+        "atr_scaled_momentum_12",
+        "atr_scaled_momentum_24",
+        "causal_lp_gap_12_48",
+        "causal_lp_slope_12",
+        "causal_lp_gap_24_72",
+        "trend_24",
+        "adx_14",
+        "vol_24",
+        "range_ratio",
+        "volume_z_24",
+    ),
 }
 
 FEATURE_COLUMNS: tuple[str, ...] = FEATURE_PACKS["baseline"]
@@ -252,6 +265,22 @@ def _compute_garman_klass_volatility(frame: pd.DataFrame, window: int = 24) -> p
     return np.sqrt(estimator.clip(lower=0.0))
 
 
+def _causal_low_pass(series: pd.Series, span: int, poles: int = 2) -> pd.Series:
+    if span <= 1:
+        return series.astype(float)
+    alpha = 2.0 / (span + 1.0)
+    values = series.astype(float).to_numpy(copy=True)
+    filtered = values
+    for _ in range(max(poles, 1)):
+        filtered = lfilter([alpha], [1.0, -(1.0 - alpha)], filtered)
+    return pd.Series(filtered, index=series.index, dtype="float64")
+
+
+def _atr_scaled_momentum(close: pd.Series, atr_ratio: pd.Series, lookback: int) -> pd.Series:
+    raw_momentum = close.pct_change(lookback)
+    return raw_momentum / atr_ratio.replace(0.0, np.nan)
+
+
 def _is_intraday(frame: pd.DataFrame) -> bool:
     deltas = frame["timestamp"].sort_values().diff().dropna()
     if deltas.empty:
@@ -327,6 +356,15 @@ def build_feature_frame(
     frame["realized_kurt_24"] = log_return_1.rolling(24).kurt()
     frame["parkinson_vol_24"] = _compute_parkinson_volatility(frame, 24)
     frame["garman_klass_vol_24"] = _compute_garman_klass_volatility(frame, 24)
+    frame["causal_lp_12"] = _causal_low_pass(frame["close"], 12, poles=2)
+    frame["causal_lp_24"] = _causal_low_pass(frame["close"], 24, poles=2)
+    frame["causal_lp_48"] = _causal_low_pass(frame["close"], 48, poles=2)
+    frame["causal_lp_72"] = _causal_low_pass(frame["close"], 72, poles=2)
+    frame["causal_lp_gap_12_48"] = frame["causal_lp_12"] / frame["causal_lp_48"].replace(0.0, np.nan) - 1.0
+    frame["causal_lp_gap_24_72"] = frame["causal_lp_24"] / frame["causal_lp_72"].replace(0.0, np.nan) - 1.0
+    frame["causal_lp_slope_12"] = frame["causal_lp_12"].pct_change(3)
+    frame["atr_scaled_momentum_12"] = _atr_scaled_momentum(frame["close"], frame["atr_ratio_14"], 12)
+    frame["atr_scaled_momentum_24"] = _atr_scaled_momentum(frame["close"], frame["atr_ratio_14"], 24)
 
     daily_context = _compute_daily_context_features(frame)
     daily_context_columns = [column for column in daily_context.columns if column.startswith("daily_")]
