@@ -18,6 +18,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Logs reproducible local run artifacts with config snapshots, manifests, and exported tables.
 - Checks robustness across a multi-asset basket instead of only the primary symbol.
 - Exports the signal history as both CSV and JSON.
+- Benchmarks the HMM against tougher simple references including ATR trend, ATR breakout-stop, and daily-trend-filter baselines.
 - Adds a constrained local `autoresearch` loop with a frozen evaluator, feature-pack candidates, `research_program.md`, local `results.tsv` logging, and artifact export for the best runs.
 
 ## Quick Start

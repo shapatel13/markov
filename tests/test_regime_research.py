@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.baselines import summarize_baselines
+from markov_regime.baselines import build_daily_trend_filter_baseline, summarize_baselines
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.consensus import (
     ConsensusDiagnostics,
@@ -492,8 +492,28 @@ def test_execution_cost_model_penalizes_wider_ranges_and_thinner_volume() -> Non
 def test_baseline_summary_includes_expected_references(synthetic_feature_frame: pd.DataFrame) -> None:
     baseline_comparison = summarize_baselines(synthetic_feature_frame, "1hour", StrategyConfig())
 
-    assert {"buy_and_hold", "ema_trend", "vol_filtered_trend", "breakout"}.issubset(set(baseline_comparison["baseline"]))
+    assert {
+        "buy_and_hold",
+        "ema_trend",
+        "vol_filtered_trend",
+        "breakout",
+        "atr_trend",
+        "atr_breakout_stop",
+        "daily_trend_filter",
+    }.issubset(set(baseline_comparison["baseline"]))
     assert {"sharpe", "annualized_return", "trades", "expectancy"}.issubset(baseline_comparison.columns)
+
+
+def test_daily_trend_filter_baseline_uses_daily_context_when_available(synthetic_feature_frame: pd.DataFrame) -> None:
+    frame = synthetic_feature_frame.copy()
+    frame["daily_trend_20"] = 0.1
+    frame["daily_ema_gap_20"] = 0.02
+    frame["daily_adx_14"] = 0.2
+
+    baseline = build_daily_trend_filter_baseline(frame, StrategyConfig())
+
+    assert baseline["signal_position"].max() == 1
+    assert baseline["guardrail_reason"].eq("daily_trend_filter").all()
 
 
 def test_block_bootstrap_returns_major_metric_intervals() -> None:
