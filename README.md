@@ -5,7 +5,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 ## What It Does
 
 - Fetches daily or hourly bars from Financial Modeling Prep and locally resamples complete `4hour` candles from hourly data.
-- Builds multiple compact feature packs spanning return, trend, volatility, range, EMA distance, compression, and volume structure.
+- Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, and realized skew/kurtosis structure.
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
 - Compares 5 through 9 HMM states side by side.
 - Compares `4hour`, `1day`, and `1hour` operating modes so higher-timeframe trades can be judged against both the slower swing lane and the noisier intraday baseline.

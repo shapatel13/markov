@@ -24,7 +24,7 @@ from markov_regime.data import DataFetchResult, fetch_price_data
 from markov_regime.features import FEATURE_COLUMNS, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list
-from markov_regime.strategy import parameter_sweep
+from markov_regime.strategy import parameter_sweep, replay_strategy
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
 
@@ -54,6 +54,14 @@ RESULT_COLUMNS: tuple[str, ...] = (
     "selection_sharpe",
     "confirmation_sharpe",
     "fold_consistency_gap",
+    "outer_holdout_folds",
+    "outer_holdout_sharpe",
+    "outer_holdout_annualized_return",
+    "outer_holdout_trades",
+    "selected_inner_posterior_threshold",
+    "selected_inner_min_hold_bars",
+    "selected_inner_cooldown_bars",
+    "selected_inner_required_confirmations",
     "benchmark_sharpe",
     "benchmark_annualized_return",
     "robustness_median_sharpe",
@@ -72,7 +80,7 @@ INTERVAL_PRIORITY: dict[Interval, int] = {"4hour": 0, "1day": 1, "1hour": 2}
 class ResearchProgram:
     symbol: str = "BTCUSD"
     intervals: tuple[Interval, ...] = DEFAULT_RESEARCH_INTERVALS
-    feature_packs: tuple[str, ...] = ("baseline", "trend", "volatility", "regime_mix")
+    feature_packs: tuple[str, ...] = ("baseline", "trend", "volatility", "regime_mix", "trend_context", "regime_context")
     limit: int = 5000
     robustness_symbols: tuple[str, ...] = ("BTCUSD", "ETHUSD", "SOLUSD")
     state_counts: tuple[int, ...] = (5, 6, 7, 8, 9)
@@ -84,6 +92,7 @@ class ResearchProgram:
     max_candidates: int = 24
     artifact_top_k: int = 3
     auto_adjust_windows: bool = True
+    outer_holdout_folds: int = 1
 
 
 def _json_block_pattern() -> re.Pattern[str]:
@@ -168,6 +177,7 @@ def load_research_program(path: str | Path = "research_program.md") -> ResearchP
         max_candidates=int(payload.get("max_candidates", 24)),
         artifact_top_k=int(payload.get("artifact_top_k", 3)),
         auto_adjust_windows=bool(payload.get("auto_adjust_windows", True)),
+        outer_holdout_folds=int(payload.get("outer_holdout_folds", 1)),
     )
 
 
@@ -293,7 +303,11 @@ def _fold_consistency_metrics(result) -> dict[str, float]:
     }
 
 
-def _score_candidate(result, robustness: pd.DataFrame) -> tuple[float, str, str, dict[str, float]]:
+def _score_candidate(
+    result,
+    robustness: pd.DataFrame,
+    nested_summary: dict[str, object] | None = None,
+) -> tuple[float, str, str, dict[str, float]]:
     bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
     stability = float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0
     benchmark_gap = result.metrics["annualized_return"] - result.benchmark_metrics["annualized_return"]
@@ -301,6 +315,7 @@ def _score_candidate(result, robustness: pd.DataFrame) -> tuple[float, str, str,
     ok_rows = robustness.loc[robustness["status"] == "ok"] if "status" in robustness.columns else pd.DataFrame()
     robustness_median = float(ok_rows["sharpe"].median()) if not ok_rows.empty else float("nan")
     consistency = _fold_consistency_metrics(result)
+    outer_holdout_sharpe = float(nested_summary.get("outer_holdout_sharpe", 0.0)) if nested_summary else 0.0
 
     score = float(result.metrics["sharpe"])
     score += 0.35 * bootstrap_lower
@@ -309,6 +324,7 @@ def _score_candidate(result, robustness: pd.DataFrame) -> tuple[float, str, str,
     score += 0.2 * min(cost_break, 20.0) / 20.0
     score += 0.25 * consistency["confirmation_sharpe"]
     score -= 0.15 * consistency["fold_consistency_gap"]
+    score += 0.35 * outer_holdout_sharpe
     if pd.notna(robustness_median):
         score += 0.15 * robustness_median
     if result.metrics["trades"] < 3:
@@ -333,12 +349,15 @@ def _score_candidate(result, robustness: pd.DataFrame) -> tuple[float, str, str,
         notes.append("late_fold_confirmation_weak")
     if consistency["fold_consistency_gap"] > 1.0:
         notes.append("fold_performance_inconsistent")
+    if nested_summary and nested_summary.get("status") == "ok" and outer_holdout_sharpe <= 0.0:
+        notes.append("outer_holdout_weak")
 
     if (
         result.metrics["sharpe"] > 0.0
         and bootstrap_lower > 0.0
         and stability >= 0.5
         and consistency["confirmation_sharpe"] > 0.0
+        and (not nested_summary or nested_summary.get("status") != "ok" or outer_holdout_sharpe > 0.0)
         and (pd.isna(robustness_median) or robustness_median > 0.0)
     ):
         status = "keep"
@@ -563,6 +582,95 @@ def _candidate_grid(program: ResearchProgram) -> list[tuple[Interval, str, int, 
     return grid[: program.max_candidates]
 
 
+def _centered_sweep_config(base_config: StrategyConfig) -> SweepConfig:
+    return SweepConfig(
+        posterior_thresholds=tuple(
+            sorted(
+                {
+                    max(0.5, round(base_config.posterior_threshold - 0.05, 2)),
+                    round(base_config.posterior_threshold, 2),
+                    min(0.9, round(base_config.posterior_threshold + 0.05, 2)),
+                }
+            )
+        ),
+        min_hold_bars=tuple(sorted({max(1, base_config.min_hold_bars // 2), base_config.min_hold_bars, base_config.min_hold_bars + 4})),
+        cooldown_bars=tuple(sorted({max(0, base_config.cooldown_bars - 2), base_config.cooldown_bars, base_config.cooldown_bars + 2})),
+        required_confirmations=tuple(
+            sorted({max(1, base_config.required_confirmations - 1), base_config.required_confirmations, base_config.required_confirmations + 1})
+        ),
+    )
+
+
+def _parameter_row_score(row: pd.Series) -> float:
+    score = float(row.get("sharpe", 0.0))
+    score += 0.2 * float(row.get("confidence_coverage", 0.0))
+    score += 0.1 * min(float(row.get("trades", 0.0)), 10.0) / 10.0
+    score -= 2.0 * abs(min(float(row.get("max_drawdown", 0.0)), 0.0))
+    if float(row.get("trades", 0.0)) < 2.0:
+        score -= 0.5
+    return score
+
+
+def nested_holdout_evaluation(
+    *,
+    predictions: pd.DataFrame,
+    n_states: int,
+    base_config: StrategyConfig,
+    interval: Interval,
+    outer_holdout_folds: int = 1,
+) -> dict[str, object]:
+    fold_ids = sorted(int(fold_id) for fold_id in predictions["fold_id"].dropna().unique())
+    if len(fold_ids) < 3:
+        return {
+            "status": "insufficient_folds",
+            "outer_holdout_folds": 0.0,
+            "outer_holdout_sharpe": 0.0,
+            "outer_holdout_annualized_return": 0.0,
+            "outer_holdout_trades": 0.0,
+            "selected_inner_posterior_threshold": float(base_config.posterior_threshold),
+            "selected_inner_min_hold_bars": float(base_config.min_hold_bars),
+            "selected_inner_cooldown_bars": float(base_config.cooldown_bars),
+            "selected_inner_required_confirmations": float(base_config.required_confirmations),
+        }
+
+    outer_count = max(1, min(outer_holdout_folds, len(fold_ids) - 1))
+    inner_fold_ids = fold_ids[:-outer_count]
+    outer_fold_ids = fold_ids[-outer_count:]
+    inner_predictions = predictions.loc[predictions["fold_id"].isin(inner_fold_ids)].reset_index(drop=True)
+    outer_predictions = predictions.loc[predictions["fold_id"].isin(outer_fold_ids)].reset_index(drop=True)
+
+    inner_sweep = parameter_sweep(
+        predictions=inner_predictions,
+        n_states=n_states,
+        base_config=base_config,
+        sweep_config=_centered_sweep_config(base_config),
+        interval=interval,
+    )
+    ranked = inner_sweep.copy()
+    ranked["selection_score"] = ranked.apply(_parameter_row_score, axis=1)
+    best_row = ranked.sort_values(["selection_score", "sharpe"], ascending=[False, False]).iloc[0]
+    selected_config = replace(
+        base_config,
+        posterior_threshold=float(best_row["posterior_threshold"]),
+        min_hold_bars=int(best_row["min_hold_bars"]),
+        cooldown_bars=int(best_row["cooldown_bars"]),
+        required_confirmations=int(best_row["required_confirmations"]),
+    )
+    _, outer_metrics = replay_strategy(outer_predictions, n_states, selected_config, interval)
+    return {
+        "status": "ok",
+        "outer_holdout_folds": float(outer_count),
+        "outer_holdout_sharpe": float(outer_metrics["sharpe"]),
+        "outer_holdout_annualized_return": float(outer_metrics["annualized_return"]),
+        "outer_holdout_trades": float(outer_metrics["trades"]),
+        "selected_inner_posterior_threshold": float(best_row["posterior_threshold"]),
+        "selected_inner_min_hold_bars": float(best_row["min_hold_bars"]),
+        "selected_inner_cooldown_bars": float(best_row["cooldown_bars"]),
+        "selected_inner_required_confirmations": float(best_row["required_confirmations"]),
+        "selection_score": float(best_row["selection_score"]),
+    }
+
+
 def run_autoresearch(
     *,
     program: ResearchProgram,
@@ -641,7 +749,14 @@ def run_autoresearch(
                         }
                     )
             robustness = pd.DataFrame(robustness_rows)
-            score, status, notes, consistency = _score_candidate(result, robustness)
+            nested_summary = nested_holdout_evaluation(
+                predictions=result.predictions,
+                n_states=n_states,
+                base_config=strategy_config,
+                interval=interval,
+                outer_holdout_folds=program.outer_holdout_folds,
+            )
+            score, status, notes, consistency = _score_candidate(result, robustness, nested_summary)
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             ok_rows = robustness.loc[robustness["status"] == "ok"] if "status" in robustness.columns else pd.DataFrame()
             robustness_median = float(ok_rows["sharpe"].median()) if not ok_rows.empty else float("nan")
@@ -673,6 +788,14 @@ def run_autoresearch(
                     "selection_sharpe": consistency["selection_sharpe"],
                     "confirmation_sharpe": consistency["confirmation_sharpe"],
                     "fold_consistency_gap": consistency["fold_consistency_gap"],
+                    "outer_holdout_folds": nested_summary["outer_holdout_folds"],
+                    "outer_holdout_sharpe": nested_summary["outer_holdout_sharpe"],
+                    "outer_holdout_annualized_return": nested_summary["outer_holdout_annualized_return"],
+                    "outer_holdout_trades": nested_summary["outer_holdout_trades"],
+                    "selected_inner_posterior_threshold": nested_summary["selected_inner_posterior_threshold"],
+                    "selected_inner_min_hold_bars": nested_summary["selected_inner_min_hold_bars"],
+                    "selected_inner_cooldown_bars": nested_summary["selected_inner_cooldown_bars"],
+                    "selected_inner_required_confirmations": nested_summary["selected_inner_required_confirmations"],
                     "benchmark_sharpe": result.benchmark_metrics["sharpe"],
                     "benchmark_annualized_return": result.benchmark_metrics["annualized_return"],
                     "robustness_median_sharpe": robustness_median,
@@ -722,6 +845,14 @@ def run_autoresearch(
                     "selection_sharpe": 0.0,
                     "confirmation_sharpe": 0.0,
                     "fold_consistency_gap": 0.0,
+                    "outer_holdout_folds": 0.0,
+                    "outer_holdout_sharpe": 0.0,
+                    "outer_holdout_annualized_return": 0.0,
+                    "outer_holdout_trades": 0.0,
+                    "selected_inner_posterior_threshold": 0.0,
+                    "selected_inner_min_hold_bars": 0.0,
+                    "selected_inner_cooldown_bars": 0.0,
+                    "selected_inner_required_confirmations": 0.0,
                     "benchmark_sharpe": 0.0,
                     "benchmark_annualized_return": 0.0,
                     "robustness_median_sharpe": 0.0,
@@ -757,6 +888,7 @@ def run_autoresearch(
         notes = build_research_notes(context["selected_result"], comparison)
         notes.append(f"feature_pack={context['feature_pack']}")
         notes.append(f"research_score={float(row.research_score):.4f}")
+        notes.append(f"outer_holdout_sharpe={float(row.outer_holdout_sharpe):.4f}")
         artifact = write_run_artifact_bundle(
             symbol=str(row.symbol),
             resolved_symbol=context["fetched"].resolved_symbol,

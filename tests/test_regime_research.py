@@ -3,10 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.baselines import summarize_baselines
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.consensus import (
+    ConsensusDiagnostics,
+    apply_consensus_overlay,
+    build_consensus_timeline,
+    compare_consensus_gate_modes,
+    summarize_consensus,
+)
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
 from markov_regime.data import normalize_symbol
@@ -23,6 +32,7 @@ from markov_regime.research import (
     _fold_consistency_metrics,
     ensure_results_tsv,
     load_research_program,
+    nested_holdout_evaluation,
     run_feature_pack_comparison,
     write_research_program,
 )
@@ -31,11 +41,15 @@ from markov_regime.robustness import parse_symbol_list
 from markov_regime.strategy import (
     apply_trading_rules,
     attach_state_action_columns,
+    build_trade_table,
+    compute_metrics,
     derive_state_actions,
     estimate_execution_cost_bps,
     parameter_sweep,
+    stress_test_transaction_costs,
+    summarize_trade_table,
 )
-from markov_regime.walkforward import generate_walk_forward_windows, run_walk_forward, suggest_walk_forward_config
+from markov_regime.walkforward import WalkForwardResult, generate_walk_forward_windows, run_walk_forward, suggest_walk_forward_config
 
 
 def _signal_input_frame(max_posteriors: list[float]) -> pd.DataFrame:
@@ -56,6 +70,66 @@ def _signal_input_frame(max_posteriors: list[float]) -> pd.DataFrame:
     return base
 
 
+def _consensus_comparison_fixture() -> tuple[WalkForwardResult, ConsensusDiagnostics]:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9])
+    frame["fold_id"] = [0, 0, 0, 0]
+    frame["signal_position"] = [0, 1, 1, 1]
+    frame["candidate_action"] = [1, 1, 1, 1]
+    frame["guardrail_reason"] = ["", "", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001, -0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = frame["gross_strategy_return"]
+    frame["asset_wealth"] = (1.0 + frame["bar_return"]).cumprod()
+    frame["strategy_wealth"] = (1.0 + frame["net_strategy_return"]).cumprod()
+
+    config = StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67, consensus_gate_mode="entry_only")
+    trade_log = build_trade_table(frame)
+    result = WalkForwardResult(
+        n_states=1,
+        predictions=frame,
+        fold_diagnostics=pd.DataFrame(),
+        state_stability=pd.DataFrame(),
+        metrics=compute_metrics(frame, "4hour"),
+        benchmark_metrics=compute_metrics(frame.assign(signal_position=1, candidate_action=1, turnover=0.0), "4hour"),
+        cost_stress=stress_test_transaction_costs(frame, (0.0,), "4hour", config),
+        bootstrap=block_bootstrap_confidence_intervals(frame["net_strategy_return"], interval="4hour", block_length=2, samples=20),
+        forward_returns=pd.DataFrame(),
+        guardrail_summary=pd.DataFrame([{"guardrail_reason": "accepted", "bars": len(frame), "share": 1.0}]),
+        converged_ratio=1.0,
+        trade_log=trade_log,
+        trade_summary=summarize_trade_table(trade_log),
+        baseline_comparison=summarize_baselines(frame, "4hour", config),
+    )
+    diagnostics = ConsensusDiagnostics(
+        members=pd.DataFrame(),
+        timeline=pd.DataFrame(
+            {
+                "timestamp": frame["timestamp"],
+                "close": frame["close"],
+                "position_consensus": [1, 1, 1, 1],
+                "position_consensus_label": ["Long"] * 4,
+                "position_consensus_share": [0.8, 0.8, 0.55, 0.55],
+                "candidate_consensus": [1, 1, 1, 1],
+                "candidate_consensus_label": ["Long"] * 4,
+                "candidate_consensus_share": [0.8, 0.8, 0.55, 0.55],
+                "long_votes": [2, 2, 2, 2],
+                "flat_votes": [1, 1, 1, 1],
+                "short_votes": [0, 0, 0, 0],
+                "candidate_long_votes": [2, 2, 2, 2],
+                "candidate_flat_votes": [1, 1, 1, 1],
+                "candidate_short_votes": [0, 0, 0, 0],
+                "active_member_share": [2 / 3] * 4,
+                "active_candidate_share": [2 / 3] * 4,
+                "member_count": [3] * 4,
+            }
+        ),
+        summary=pd.DataFrame(),
+    )
+    return result, diagnostics
+
+
 def test_feature_frame_contains_forward_horizons(synthetic_feature_frame: pd.DataFrame) -> None:
     for horizon in FORWARD_HORIZONS:
         assert f"forward_return_{horizon}" in synthetic_feature_frame.columns
@@ -63,13 +137,75 @@ def test_feature_frame_contains_forward_horizons(synthetic_feature_frame: pd.Dat
 
 
 def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFrame) -> None:
-    assert {"baseline", "trend", "volatility", "regime_mix"}.issubset(set(list_feature_packs()))
+    assert {
+        "baseline",
+        "trend",
+        "volatility",
+        "regime_mix",
+        "trend_strength",
+        "mean_reversion",
+        "vol_surface",
+        "regime_mix_v2",
+        "trend_context",
+        "regime_context",
+    }.issubset(set(list_feature_packs()))
 
     trend_columns = get_feature_columns("trend")
     trend_frame = build_feature_frame(synthetic_prices, feature_columns=trend_columns)
+    trend_strength_columns = get_feature_columns("trend_strength")
+    trend_strength_frame = build_feature_frame(synthetic_prices, feature_columns=trend_strength_columns)
+    mean_reversion_columns = get_feature_columns("mean_reversion")
+    mean_reversion_frame = build_feature_frame(synthetic_prices, feature_columns=mean_reversion_columns)
+    vol_surface_columns = get_feature_columns("vol_surface")
+    vol_surface_frame = build_feature_frame(synthetic_prices, feature_columns=vol_surface_columns)
+    trend_context_columns = get_feature_columns("trend_context")
+    trend_context_frame = build_feature_frame(synthetic_prices, feature_columns=trend_context_columns)
+    regime_context_columns = get_feature_columns("regime_context")
+    regime_context_frame = build_feature_frame(synthetic_prices, feature_columns=regime_context_columns)
 
     assert "ema_gap_24" in trend_columns
+    assert "adx_14" in trend_strength_columns
+    assert "rsi_14" in mean_reversion_columns
+    assert "parkinson_vol_24" in vol_surface_columns
+    assert "daily_trend_20" in trend_context_columns
+    assert "daily_adx_14" in regime_context_columns
     assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
+    assert trend_strength_frame.loc[:, list(trend_strength_columns)].isna().sum().sum() == 0
+    assert mean_reversion_frame.loc[:, list(mean_reversion_columns)].isna().sum().sum() == 0
+    assert vol_surface_frame.loc[:, list(vol_surface_columns)].isna().sum().sum() == 0
+    assert trend_context_frame.loc[:, list(trend_context_columns)].isna().sum().sum() == 0
+    assert regime_context_frame.loc[:, list(regime_context_columns)].isna().sum().sum() == 0
+
+
+def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.DataFrame) -> None:
+    advanced_columns = (
+        "adx_14",
+        "plus_di_14",
+        "minus_di_14",
+        "rsi_14",
+        "stoch_k_14",
+        "bollinger_z_20",
+        "bollinger_bandwidth_20",
+        "donchian_position_20",
+        "breakout_distance_20",
+        "distance_to_vwap_24",
+        "realized_skew_24",
+        "realized_kurt_24",
+        "parkinson_vol_24",
+        "garman_klass_vol_24",
+        "daily_trend_5",
+        "daily_trend_20",
+        "daily_ema_gap_20",
+        "daily_rsi_14",
+        "daily_bollinger_z_20",
+        "daily_adx_14",
+        "daily_di_spread_14",
+        "daily_range_ratio_10",
+    )
+    frame = build_feature_frame(synthetic_prices, feature_columns=advanced_columns)
+
+    assert set(advanced_columns).issubset(frame.columns)
+    assert np.isfinite(frame.loc[:, list(advanced_columns)].to_numpy()).all()
 
 
 def test_normalize_symbol_maps_common_crypto_aliases() -> None:
@@ -148,6 +284,36 @@ def test_guardrail_keeps_strategy_flat_when_posterior_is_low() -> None:
 
     assert result["signal_position"].eq(0).all()
     assert set(result["guardrail_reason"]) == {"posterior_below_threshold"}
+
+
+def test_multi_horizon_state_scoring_requires_consistency() -> None:
+    validate_frame = pd.DataFrame(
+        {
+            "canonical_state": [0] * 30 + [1] * 30,
+            "max_posterior": [0.9] * 60,
+            "forward_return_6": [0.02] * 30 + [0.02] * 30,
+            "forward_return_12": [-0.02] * 30 + [0.015] * 30,
+            "forward_return_24": [0.0] * 30 + [0.01] * 30,
+        }
+    )
+
+    state_actions = derive_state_actions(
+        validate_frame,
+        n_states=2,
+        config=StrategyConfig(
+            min_validation_samples=10,
+            scoring_horizons=(6, 12, 24),
+            validation_shrinkage=0.0,
+            min_consistent_horizons=2,
+            required_confirmations=1,
+        ),
+    ).set_index("canonical_state")
+
+    assert int(state_actions.loc[0, "action"]) == 0
+    assert state_actions.loc[0, "label"] == "inconsistent_across_horizons"
+    assert int(state_actions.loc[1, "action"]) == 1
+    assert state_actions.loc[1, "label"] == "risk_on"
+    assert int(state_actions.loc[1, "consistent_horizons"]) >= 2
 
 
 def test_daily_confirmation_overlay_blocks_opposing_exposure() -> None:
@@ -245,6 +411,50 @@ def test_confirmations_and_min_hold_delay_entry_and_exit() -> None:
     assert result.loc[3, "guardrail_reason"] == "posterior_below_threshold"
 
 
+def test_trade_table_extracts_closed_and_open_trades() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1, 0, 1, 1]
+    frame["candidate_action"] = [0, 1, 1, 0, 1, 1]
+    frame["guardrail_reason"] = ["", "", "", "flat_exit", "", ""]
+    frame["turnover"] = frame["signal_position"].diff().abs().fillna(0.0)
+    frame["gross_strategy_return"] = [0.0, 0.0, 0.01, -0.02, 0.0, 0.03]
+    frame["execution_cost_bps"] = [0.0] * len(frame)
+    frame["transaction_cost"] = [0.0] * len(frame)
+    frame["net_strategy_return"] = frame["gross_strategy_return"]
+    frame["asset_wealth"] = (1.0 + frame["bar_return"]).cumprod()
+    frame["strategy_wealth"] = (1.0 + frame["net_strategy_return"]).cumprod()
+
+    trade_table = build_trade_table(frame)
+
+    assert len(trade_table) == 2
+    assert trade_table["status"].tolist() == ["closed", "open"]
+    assert trade_table["bars_held"].tolist() == [2, 1]
+    assert float(trade_table.iloc[0]["net_return"]) < 0.0
+    assert float(trade_table.iloc[1]["net_return"]) > 0.0
+
+
+def test_compute_metrics_includes_trade_level_fields() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1, 0, 1, 1]
+    frame["candidate_action"] = [0, 1, 1, 0, 1, 1]
+    frame["guardrail_reason"] = ["", "", "", "flat_exit", "", ""]
+    frame["turnover"] = frame["signal_position"].diff().abs().fillna(0.0)
+    frame["gross_strategy_return"] = [0.0, 0.0, 0.02, -0.005, 0.0, 0.01]
+    frame["execution_cost_bps"] = [0.0] * len(frame)
+    frame["transaction_cost"] = [0.0] * len(frame)
+    frame["net_strategy_return"] = frame["gross_strategy_return"]
+    frame["asset_wealth"] = (1.0 + frame["bar_return"]).cumprod()
+    frame["strategy_wealth"] = (1.0 + frame["net_strategy_return"]).cumprod()
+
+    metrics = compute_metrics(frame, "1hour")
+
+    assert {"bar_win_rate", "trade_win_rate", "expectancy", "profit_factor", "avg_mfe", "avg_mae", "open_trade_count"}.issubset(metrics)
+    assert metrics["win_rate"] == metrics["trade_win_rate"]
+    assert metrics["trades"] == 2.0
+    assert metrics["closed_trade_count"] == 1.0
+    assert metrics["open_trade_count"] == 1.0
+
+
 def test_parameter_sweep_produces_all_requested_combinations() -> None:
     frame = _signal_input_frame([0.8, 0.8, 0.7, 0.4, 0.8, 0.8, 0.7, 0.4])
     frame["fold_id"] = 0
@@ -275,6 +485,13 @@ def test_execution_cost_model_penalizes_wider_ranges_and_thinner_volume() -> Non
     frame["volume"] = [5_000_000, 50_000]
     costs = estimate_execution_cost_bps(frame, StrategyConfig())
     assert float(costs.iloc[1]) > float(costs.iloc[0])
+
+
+def test_baseline_summary_includes_expected_references(synthetic_feature_frame: pd.DataFrame) -> None:
+    baseline_comparison = summarize_baselines(synthetic_feature_frame, "1hour", StrategyConfig())
+
+    assert {"buy_and_hold", "ema_trend", "vol_filtered_trend", "breakout"}.issubset(set(baseline_comparison["baseline"]))
+    assert {"sharpe", "annualized_return", "trades", "expectancy"}.issubset(baseline_comparison.columns)
 
 
 def test_block_bootstrap_returns_major_metric_intervals() -> None:
@@ -456,6 +673,153 @@ def test_fold_consistency_metrics_split_early_and_late_folds() -> None:
     assert metrics["fold_consistency_gap"] == 1.25
 
 
+def test_consensus_timeline_computes_majority_votes() -> None:
+    member_predictions = {
+        "a": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [1, 1, 0],
+                "candidate_action": [1, 0, 0],
+            }
+        ),
+        "b": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [1, 0, 0],
+                "candidate_action": [1, -1, 0],
+            }
+        ),
+        "c": pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-01-01", periods=3, freq="4h"),
+                "close": [100.0, 101.0, 102.0],
+                "signal_position": [0, 0, 0],
+                "candidate_action": [0, 0, 0],
+            }
+        ),
+    }
+
+    timeline = build_consensus_timeline(member_predictions)
+    summary = summarize_consensus(pd.DataFrame([{"sharpe": 1.0, "stability_score": 0.8}, {"sharpe": 0.5, "stability_score": 0.6}, {"sharpe": -0.2, "stability_score": 0.4}]), timeline)
+
+    assert timeline["position_consensus"].tolist() == [1, 0, 0]
+    assert timeline["candidate_consensus"].tolist() == [1, 0, 0]
+    assert timeline["position_consensus_share"].tolist()[0] == 2 / 3
+    assert not summary.empty
+    assert "Latest Held Consensus" in set(summary["metric"])
+
+
+def test_consensus_overlay_blocks_when_share_is_too_low() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["consensus_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="4h")
+    frame["consensus_position"] = [1, 1, 1]
+    frame["consensus_position_share"] = [0.55, 0.55, 0.55]
+    frame["consensus_candidate"] = [1, 1, 1]
+    frame["consensus_candidate_share"] = [0.55, 0.55, 0.55]
+
+    filtered, summary = apply_consensus_overlay(frame, StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67))
+
+    assert filtered["signal_position"].eq(0).all()
+    assert set(filtered["guardrail_reason"]) == {"consensus_weak_share"}
+    assert "weak_share" in set(summary["consensus_status"])
+
+
+def test_consensus_entry_only_mode_preserves_existing_hold() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["consensus_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="4h")
+    frame["consensus_position"] = [1, 1, 1]
+    frame["consensus_position_share"] = [0.8, 0.8, 0.55]
+    frame["consensus_candidate"] = [1, 1, 1]
+    frame["consensus_candidate_share"] = [0.8, 0.8, 0.55]
+
+    filtered, summary = apply_consensus_overlay(
+        frame,
+        StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67, consensus_gate_mode="entry_only"),
+    )
+
+    assert filtered["signal_position"].tolist() == [0, 1, 1]
+    assert filtered.loc[2, "guardrail_reason"] == "consensus_hold_weak_share"
+    assert "weak_share" in set(summary["consensus_status"])
+
+
+def test_compare_consensus_gate_modes_surfaces_off_hard_and_entry_only() -> None:
+    result, diagnostics = _consensus_comparison_fixture()
+
+    comparison = compare_consensus_gate_modes(
+        result,
+        diagnostics,
+        interval="4hour",
+        strategy_config=StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67, consensus_gate_mode="entry_only"),
+    )
+
+    assert comparison["mode"].tolist() == ["off", "hard", "entry_only"]
+    assert comparison.loc[comparison["mode"] == "entry_only", "selected"].item() is True
+    assert comparison.loc[comparison["mode"] == "off", "selected"].item() is False
+    assert comparison.loc[comparison["mode"] == "hard", "latest_guardrail"].item() == "consensus_weak_share"
+    assert comparison.loc[comparison["mode"] == "entry_only", "latest_guardrail"].item() == "consensus_hold_weak_share"
+    assert comparison.loc[comparison["mode"] == "hard", "blocked_requested_share"].item() > 0.0
+    assert comparison.loc[comparison["mode"] == "off", "blocked_requested_share"].item() == 0.0
+
+
+def test_nested_holdout_evaluation_returns_outer_metrics() -> None:
+    frame = _signal_input_frame([0.9] * 15)
+    frame["fold_id"] = [0] * 5 + [1] * 5 + [2] * 5
+    state_actions = pd.DataFrame(
+        [
+            {
+                "canonical_state": 0,
+                "action": 1,
+                "label": "risk_on",
+                "validation_edge": 0.02,
+                "score_lower": 0.015,
+                "score_upper": 0.03,
+                "consistent_horizons": 3,
+                "samples": 50,
+                "avg_confidence": 0.8,
+            }
+        ]
+    )
+    predictions = attach_state_action_columns(
+        apply_trading_rules(frame, state_actions, StrategyConfig(required_confirmations=1)),
+        state_actions,
+        1,
+    )
+
+    nested = nested_holdout_evaluation(
+        predictions=predictions,
+        n_states=1,
+        base_config=StrategyConfig(required_confirmations=1),
+        interval="1hour",
+        outer_holdout_folds=1,
+    )
+
+    assert nested["status"] == "ok"
+    assert nested["outer_holdout_folds"] == 1.0
+    assert {"outer_holdout_sharpe", "selected_inner_posterior_threshold", "selected_inner_required_confirmations"}.issubset(nested)
+
+
 def test_feature_pack_comparison_runs_on_synthetic_prices(synthetic_prices: pd.DataFrame) -> None:
     comparison = run_feature_pack_comparison(
         price_frame=synthetic_prices,
@@ -485,7 +849,10 @@ def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataF
     assert not result.fold_diagnostics.empty
     assert not result.state_stability.empty
     assert not result.forward_returns.empty
+    assert not result.trade_summary.empty
+    assert {"metric", "value"}.issubset(result.trade_summary.columns)
     assert "sharpe" in result.metrics
+    assert "trade_win_rate" in result.metrics
     assert "sharpe" in result.benchmark_metrics
 
 
@@ -521,11 +888,15 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
         feature_columns=FEATURE_COLUMNS,
         metadata={"feature_pack": "baseline"},
         timeframe_comparison=pd.DataFrame([{"interval": "4hour", "status": "ok", "sharpe": result.metrics["sharpe"]}]),
+        consensus_mode_comparison=pd.DataFrame([{"mode": "off", "label": "No Consensus", "selected": True, "sharpe": result.metrics["sharpe"]}]),
         export_dir=tmp_path,
     )
     assert bundle.manifest_path.exists()
     assert bundle.files["signal_report_csv"].exists()
+    assert bundle.files["trade_summary_csv"].exists()
     assert bundle.files["timeframe_comparison_csv"].exists()
+    assert bundle.files["consensus_mode_comparison_csv"].exists()
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)
     assert manifest["metadata"]["feature_pack"] == "baseline"
+    assert manifest["schema_version"] == 4

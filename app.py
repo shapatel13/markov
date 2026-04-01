@@ -14,6 +14,7 @@ if str(SRC_PATH) not in sys.path:
 
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
@@ -30,7 +31,9 @@ from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
 from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
+    plot_baseline_comparison,
     plot_cost_stress,
+    plot_consensus_mode_comparison,
     plot_equity_curve,
     plot_forward_return_heatmap,
     plot_guardrail_summary,
@@ -38,6 +41,7 @@ from markov_regime.ui import (
     plot_feature_pack_comparison,
     plot_regime_timeline,
     plot_robustness_results,
+    plot_consensus_timeline,
     plot_sensitivity,
     plot_state_stability,
     plot_timeframe_comparison,
@@ -88,10 +92,16 @@ st.caption("BTC 4H preset with daily confirmation, walk-forward HMM diagnostics,
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
     st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
+    feature_pack_options = list(list_feature_packs())
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
     default_walk = default_walk_forward_config(interval)
-    feature_pack = st.selectbox("Feature pack", options=list(list_feature_packs()), index=0, help=CONTROL_HELP["feature_pack"])
+    feature_pack = st.selectbox(
+        "Feature pack",
+        options=feature_pack_options,
+        index=feature_pack_options.index("trend") if "trend" in feature_pack_options else 0,
+        help=CONTROL_HELP["feature_pack"],
+    )
     limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100, help=CONTROL_HELP["limit"])
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6, help=CONTROL_HELP["states"])
     train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12, help=CONTROL_HELP["train_bars"])
@@ -106,6 +116,9 @@ with st.sidebar.form("controls"):
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
+    require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
+    consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
+    consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
     cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
     slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
@@ -113,6 +126,7 @@ with st.sidebar.form("controls"):
     robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
     run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
     run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
+    run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
 
@@ -137,13 +151,16 @@ if run_clicked:
                 required_confirmations=int(required_confirmations),
                 confidence_gap=confidence_gap,
                 require_daily_confirmation=require_daily_confirmation,
+                require_consensus_confirmation=require_consensus_confirmation,
+                consensus_min_share=consensus_min_share,
+                consensus_gate_mode=consensus_gate_mode,
                 cost_bps=cost_bps,
                 spread_bps=spread_bps,
                 slippage_bps=slippage_bps,
                 impact_bps=impact_bps,
             )
             execution_strategy_config = strategy_config
-            model_strategy_config = replace(strategy_config, require_daily_confirmation=False)
+            model_strategy_config = replace(strategy_config, require_daily_confirmation=False, require_consensus_confirmation=False)
             fetched = fetch_price_data(data_config)
             feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
             walk_config, was_adjusted = (
@@ -234,6 +251,37 @@ if run_clicked:
                 if run_feature_pack_check
                 else pd.DataFrame()
             )
+            consensus_required = run_consensus_check or strategy_config.require_consensus_confirmation
+            consensus = (
+                run_consensus_diagnostics(
+                    symbol=symbol,
+                    interval=data_config.interval,
+                    limit=int(limit),
+                    feature_columns=feature_columns,
+                    model_config=model_config,
+                    strategy_config=execution_strategy_config,
+                    auto_adjust_windows=auto_adjust_windows,
+                )
+                if consensus_required
+                else None
+            )
+            consensus_mode_comparison = (
+                compare_consensus_gate_modes(
+                    selected_result,
+                    consensus,
+                    interval=data_config.interval,
+                    strategy_config=execution_strategy_config,
+                )
+                if consensus is not None
+                else pd.DataFrame()
+            )
+            if consensus is not None and strategy_config.require_consensus_confirmation:
+                selected_result = apply_consensus_confirmation(
+                    selected_result,
+                    consensus,
+                    interval=data_config.interval,
+                    strategy_config=execution_strategy_config,
+                )
             notes = build_research_notes(selected_result, comparison)
             artifact = write_run_artifact_bundle(
                 symbol=symbol,
@@ -254,6 +302,10 @@ if run_clicked:
                 feature_columns=feature_columns,
                 timeframe_comparison=timeframe_comparison,
                 feature_pack_comparison=feature_pack_comparison,
+                consensus_members=consensus.members if consensus is not None else None,
+                consensus_timeline=consensus.timeline if consensus is not None else None,
+                consensus_summary=consensus.summary if consensus is not None else None,
+                consensus_mode_comparison=consensus_mode_comparison,
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
@@ -263,6 +315,8 @@ if run_clicked:
                 "robustness": robustness,
                 "timeframe_comparison": timeframe_comparison,
                 "feature_pack_comparison": feature_pack_comparison,
+                "consensus": consensus,
+                "consensus_mode_comparison": consensus_mode_comparison,
                 "confirmation_enabled": bool(data_config.interval == "4hour" and strategy_config.require_daily_confirmation),
                 "confirmation_summary": selected_result.confirmation_summary,
                 "confirmation_result": confirmation_result,
@@ -309,6 +363,7 @@ sweep_results = analysis["sweep_results"]
 robustness = analysis["robustness"]
 timeframe_comparison = analysis["timeframe_comparison"]
 feature_pack_comparison = analysis["feature_pack_comparison"]
+consensus_mode_comparison = analysis.get("consensus_mode_comparison", pd.DataFrame())
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 guardrail_text = latest_row["guardrail_reason"] or "accepted"
@@ -377,6 +432,8 @@ else:
 st.caption("Held Position shows the active book. Latest Candidate shows what the newest bar alone supports before hold and cooldown mechanics are applied.")
 if analysis["confirmation_enabled"]:
     st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
+if analysis["strategy_config"].require_consensus_confirmation:
+    st.caption("Consensus Filter shows whether nearby seeds and state counts agree strongly enough with the current direction to allow exposure.")
 st.caption(f"Latest guardrail status: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
     st.caption(f"Daily confirmation source: `{analysis['confirmation_data_url']}`")
@@ -419,8 +476,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, interpretation_tab, confirmation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Interpretation", "Confirmation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, trades_tab, baselines_tab, interpretation_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Trades", "Baselines", "Interpretation", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -438,6 +495,24 @@ with overview_tab:
         st.dataframe(metric_frame, use_container_width=True)
         st.plotly_chart(plot_guardrail_summary(selected_result.guardrail_summary), use_container_width=True)
         st.plotly_chart(plot_cost_stress(selected_result.cost_stress), use_container_width=True)
+
+with trades_tab:
+    summary_col, log_col = st.columns([0.9, 1.5])
+    with summary_col:
+        st.subheader("Trade Summary")
+        st.dataframe(selected_result.trade_summary, use_container_width=True, hide_index=True)
+        st.caption("Trade-level metrics focus on realized trade outcomes, while `bar_win_rate` in the overview table tracks winning bars while exposure is active.")
+    with log_col:
+        st.subheader("Trade Log")
+        if selected_result.trade_log.empty:
+            st.info("No trades were opened on this run.")
+        else:
+            st.dataframe(selected_result.trade_log, use_container_width=True, hide_index=True)
+
+with baselines_tab:
+    st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
+    st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
+    st.caption("These are simpler reference systems on the same out-of-sample slices. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
@@ -476,6 +551,29 @@ with confirmation_tab:
         st.caption("`base_*` columns show the raw 4H proposal before the daily filter. The plain `signal_position` and `candidate_action` columns show the executed result after daily confirmation is applied.")
     else:
         st.info("Daily confirmation is currently off. Enable `Require daily confirmation for 4H trades` to make the daily lane confirm or veto the 4H execution.")
+
+with consensus_tab:
+    consensus = analysis.get("consensus")
+    if consensus is None:
+        st.info("Consensus diagnostics were not run for this analysis.")
+    else:
+        top_left, top_right = st.columns([1.0, 1.6])
+        with top_left:
+            st.subheader("Consensus Summary")
+            st.dataframe(consensus.summary, use_container_width=True, hide_index=True)
+            st.caption("Consensus asks whether nearby state counts and random seeds tell the same story. Strong single-run performance with weak consensus is a fragility warning.")
+            if not selected_result.consensus_summary.empty:
+                st.subheader("Consensus Gate Outcomes")
+                st.dataframe(selected_result.consensus_summary, use_container_width=True, hide_index=True)
+        with top_right:
+            st.plotly_chart(plot_consensus_timeline(consensus.timeline), use_container_width=True)
+        st.subheader("Gate Mode Comparison")
+        st.plotly_chart(plot_consensus_mode_comparison(consensus_mode_comparison), use_container_width=True)
+        if not consensus_mode_comparison.empty:
+            st.dataframe(consensus_mode_comparison, use_container_width=True, hide_index=True)
+        st.caption("This panel replays the same run three ways: no consensus filter, a hard consensus gate, and an entry-only consensus gate. Use it to see whether consensus is improving trust or just crushing exposure.")
+        st.subheader("Consensus Members")
+        st.dataframe(consensus.members, use_container_width=True, hide_index=True)
 
 with model_tab:
     st.plotly_chart(plot_model_comparison(comparison), use_container_width=True)

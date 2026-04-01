@@ -6,8 +6,16 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.baselines import summarize_baselines
 from markov_regime.config import Interval, StrategyConfig
-from markov_regime.strategy import build_buy_and_hold_frame, compute_metrics, estimate_execution_cost_bps, stress_test_transaction_costs
+from markov_regime.strategy import (
+    build_buy_and_hold_frame,
+    build_trade_table,
+    compute_metrics,
+    estimate_execution_cost_bps,
+    stress_test_transaction_costs,
+    summarize_trade_table,
+)
 from markov_regime.walkforward import WalkForwardResult
 
 
@@ -27,6 +35,20 @@ def _effective_confirmation_direction(frame: pd.DataFrame) -> pd.Series:
     candidate = frame["candidate_action"].fillna(0.0).astype(int)
     signal = frame["signal_position"].fillna(0.0).astype(int)
     return pd.Series(np.where(candidate != 0, candidate, signal), index=frame.index, dtype="int64")
+
+
+def _recompute_bars_held(signal_position: pd.Series) -> pd.Series:
+    bars_held: list[int] = []
+    current_position = 0
+    held = 0
+    for position in signal_position.fillna(0.0).astype(int):
+        if position != 0:
+            held = held + 1 if position == current_position else 1
+        else:
+            held = 0
+        current_position = position
+        bars_held.append(held)
+    return pd.Series(bars_held, index=signal_position.index, dtype="int64")
 
 
 def align_confirmation_predictions(
@@ -133,6 +155,7 @@ def apply_confirmation_overlay(signal_frame: pd.DataFrame, config: StrategyConfi
         overlay["base_guardrail_reason"],
     )
     overlay["guardrail_reason"] = pd.Series(overlay["guardrail_reason"], index=overlay.index).fillna("").astype(str)
+    overlay["bars_held"] = _recompute_bars_held(overlay["signal_position"])
 
     overlay["turnover"] = overlay["signal_position"].diff().abs().fillna(abs(int(overlay["signal_position"].iloc[0])))
     overlay["gross_strategy_return"] = overlay["signal_position"].shift(1).fillna(0.0) * overlay["bar_return"]
@@ -197,6 +220,9 @@ def apply_higher_timeframe_confirmation(
         block_length=max(strategy_config.signal_horizon * 2, 8),
     )
     updated_guardrail_summary = _guardrail_summary(confirmed_predictions)
+    updated_trade_log = build_trade_table(confirmed_predictions)
+    updated_trade_summary = summarize_trade_table(updated_trade_log)
+    updated_baseline_comparison = summarize_baselines(confirmed_predictions, interval, strategy_config)
 
     return replace(
         primary_result,
@@ -208,4 +234,7 @@ def apply_higher_timeframe_confirmation(
         bootstrap=updated_bootstrap,
         guardrail_summary=updated_guardrail_summary,
         confirmation_summary=confirmation_summary,
+        trade_log=updated_trade_log,
+        trade_summary=updated_trade_summary,
+        baseline_comparison=updated_baseline_comparison,
     )

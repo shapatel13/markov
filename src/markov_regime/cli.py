@@ -4,6 +4,7 @@ import argparse
 from dataclasses import replace
 
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
+from markov_regime.consensus import apply_consensus_confirmation, run_consensus_diagnostics
 from markov_regime.config import (
     DataConfig,
     ModelConfig,
@@ -44,7 +45,7 @@ def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
 def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--symbol", default="BTCUSD")
     parser.add_argument("--interval", choices=["4hour", "1day", "1hour"], default=DEFAULT_CLI_INTERVAL)
-    parser.add_argument("--feature-pack", choices=list(list_feature_packs()), default="baseline")
+    parser.add_argument("--feature-pack", choices=list(list_feature_packs()), default="trend")
     parser.add_argument("--states", type=int, default=6)
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--train-bars", type=int)
@@ -59,6 +60,9 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--required-confirmations", type=int, default=2)
     parser.add_argument("--confidence-gap", type=float, default=0.05)
     parser.add_argument("--require-daily-confirmation", action="store_true", help="Only execute 4H exposure when the daily lane agrees.")
+    parser.add_argument("--require-consensus-confirmation", action="store_true", help="Only execute exposure when nearby seeds and state counts agree.")
+    parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="hard", help="How weak consensus should be handled when the consensus filter is enabled.")
+    parser.add_argument("--consensus-min-share", type=float, default=0.67, help="Minimum consensus agreement share required before a trade is allowed.")
     parser.add_argument("--cost-bps", type=float, default=2.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
     parser.add_argument("--slippage-bps", type=float, default=3.0)
@@ -78,6 +82,9 @@ def _load_result(args: argparse.Namespace):
         required_confirmations=args.required_confirmations,
         confidence_gap=args.confidence_gap,
         require_daily_confirmation=args.require_daily_confirmation,
+        require_consensus_confirmation=args.require_consensus_confirmation,
+        consensus_min_share=args.consensus_min_share,
+        consensus_gate_mode=args.consensus_gate_mode,
         cost_bps=args.cost_bps,
         spread_bps=args.spread_bps,
         slippage_bps=args.slippage_bps,
@@ -123,6 +130,22 @@ def _load_result(args: argparse.Namespace):
             strategy_config=strategy_config,
             confirmation_interval="1day",
         )
+    if strategy_config.require_consensus_confirmation:
+        consensus = run_consensus_diagnostics(
+            symbol=data_config.symbol,
+            interval=data_config.interval,
+            limit=data_config.limit,
+            feature_columns=feature_columns,
+            model_config=model_config,
+            strategy_config=replace(strategy_config, require_consensus_confirmation=False),
+            auto_adjust_windows=not args.strict_windows,
+        )
+        result = apply_consensus_confirmation(
+            result,
+            consensus,
+            interval=data_config.interval,
+            strategy_config=strategy_config,
+        )
     return data_config, model_config, feature_columns, strategy_config, effective_walk_config, result
 
 
@@ -144,6 +167,9 @@ def main() -> None:
 
     feature_parser = subparsers.add_parser("compare-feature-packs", help="Compare feature packs on the same symbol/timeframe")
     _common_parser(feature_parser)
+
+    consensus_parser = subparsers.add_parser("consensus", help="Run nearby-state and multi-seed consensus diagnostics")
+    _common_parser(consensus_parser)
 
     init_research_parser = subparsers.add_parser("init-research", help="Create a local research program and results TSV")
     init_research_parser.add_argument("--program", default="research_program.md")
@@ -211,6 +237,22 @@ def main() -> None:
             auto_adjust_windows=not args.strict_windows,
         )
         print(feature_results.to_string(index=False))
+        return
+
+    if args.command == "consensus":
+        consensus = run_consensus_diagnostics(
+            symbol=data_config.symbol,
+            interval=data_config.interval,
+            limit=data_config.limit,
+            feature_columns=feature_columns,
+            model_config=model_config,
+            strategy_config=strategy_config,
+            auto_adjust_windows=not args.strict_windows,
+        )
+        print("Summary")
+        print(consensus.summary.to_string(index=False))
+        print("\nMembers")
+        print(consensus.members.to_string(index=False))
         return
 
     exported = export_signal_report(result.predictions, symbol=data_config.symbol, interval=data_config.interval)

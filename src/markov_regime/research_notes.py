@@ -40,6 +40,13 @@ def build_research_notes(
             "The strategy currently trails buy-and-hold on the same out-of-sample slices, which means timing precision has not yet earned back its added complexity."
         )
 
+    if selected_result.baseline_comparison is not None and not selected_result.baseline_comparison.empty:
+        best_baseline = selected_result.baseline_comparison.sort_values("sharpe", ascending=False).iloc[0]
+        if float(selected_result.metrics.get("sharpe", 0.0)) < float(best_baseline["sharpe"]):
+            notes.append(
+                f"The current HMM trails the `{best_baseline['baseline']}` baseline on Sharpe ({selected_result.metrics.get('sharpe', 0.0):.2f} vs {float(best_baseline['sharpe']):.2f}), so model complexity is not yet beating simpler rules."
+            )
+
     cost_row = selected_result.cost_stress.loc[selected_result.cost_stress["sharpe"] <= 0.0]
     if not cost_row.empty:
         first_break = float(cost_row.iloc[0]["cost_bps"])

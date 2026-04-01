@@ -70,6 +70,10 @@ def write_run_artifact_bundle(
     metadata: dict[str, Any] | None = None,
     timeframe_comparison: pd.DataFrame | None = None,
     feature_pack_comparison: pd.DataFrame | None = None,
+    consensus_members: pd.DataFrame | None = None,
+    consensus_timeline: pd.DataFrame | None = None,
+    consensus_summary: pd.DataFrame | None = None,
+    consensus_mode_comparison: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -88,6 +92,14 @@ def write_run_artifact_bundle(
     files["bootstrap_csv"] = _write_table(selected_result.bootstrap, root / "bootstrap.csv")
     files["forward_returns_csv"] = _write_table(selected_result.forward_returns, root / "forward_returns.csv")
     files["guardrails_csv"] = _write_table(selected_result.guardrail_summary, root / "guardrails.csv")
+    if selected_result.baseline_comparison is not None and not selected_result.baseline_comparison.empty:
+        files["baseline_comparison_csv"] = _write_table(selected_result.baseline_comparison, root / "baseline_comparison.csv")
+    if selected_result.trade_log is not None and not selected_result.trade_log.empty:
+        files["trade_log_csv"] = _write_table(selected_result.trade_log, root / "trade_log.csv")
+    if selected_result.trade_summary is not None and not selected_result.trade_summary.empty:
+        files["trade_summary_csv"] = _write_table(selected_result.trade_summary, root / "trade_summary.csv")
+    if selected_result.consensus_summary is not None and not selected_result.consensus_summary.empty:
+        files["consensus_gate_summary_csv"] = _write_table(selected_result.consensus_summary, root / "consensus_gate_summary.csv")
     if selected_result.confirmation_summary is not None and not selected_result.confirmation_summary.empty:
         files["confirmation_summary_csv"] = _write_table(selected_result.confirmation_summary, root / "confirmation_summary.csv")
     files["sweep_results_csv"] = _write_table(sweep_results, root / "sweep_results.csv")
@@ -96,9 +108,17 @@ def write_run_artifact_bundle(
         files["timeframe_comparison_csv"] = _write_table(timeframe_comparison, root / "timeframe_comparison.csv")
     if feature_pack_comparison is not None and not feature_pack_comparison.empty:
         files["feature_pack_comparison_csv"] = _write_table(feature_pack_comparison, root / "feature_pack_comparison.csv")
+    if consensus_members is not None and not consensus_members.empty:
+        files["consensus_members_csv"] = _write_table(consensus_members, root / "consensus_members.csv")
+    if consensus_timeline is not None and not consensus_timeline.empty:
+        files["consensus_timeline_csv"] = _write_table(consensus_timeline, root / "consensus_timeline.csv")
+    if consensus_summary is not None and not consensus_summary.empty:
+        files["consensus_summary_csv"] = _write_table(consensus_summary, root / "consensus_summary.csv")
+    if consensus_mode_comparison is not None and not consensus_mode_comparison.empty:
+        files["consensus_mode_comparison_csv"] = _write_table(consensus_mode_comparison, root / "consensus_mode_comparison.csv")
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 4,
         "run_id": run_id,
         "created_at_utc": created_at.isoformat(),
         "symbol": symbol,

@@ -25,10 +25,16 @@ CONTROL_HELP: dict[str, str] = {
     "required_confirmations": "Consecutive qualifying bars required before a new position can open. Higher values are stricter.",
     "confidence_gap": "Minimum gap between the top two posterior state probabilities. Higher values force cleaner separation between competing regimes.",
     "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
+    "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
+    "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
+    "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue.",
     "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
     "impact_bps": "Liquidity impact penalty in basis points. Higher values stress strategies that need more urgent execution.",
+    "scoring_horizons": "Forward-return horizons used to score each latent state. Multiple horizons reduce the odds that one lucky window defines the trade label.",
+    "validation_shrinkage": "Amount of shrinkage applied to state validation edges. Higher values pull weak, small-sample edges back toward zero.",
+    "min_consistent_horizons": "How many forward horizons must agree before a state becomes tradable. Higher values prefer consistency over coverage.",
 }
 
 
@@ -118,6 +124,22 @@ def describe_guardrail(reason: str, *, current_position: int, candidate_action: 
         return "The strategy is respecting the minimum hold rule, so it is not allowed to exit or reverse immediately."
     if reason_key == "cooldown_active":
         return "The strategy is in cooldown after a recent exit, so it is intentionally waiting before re-entering."
+    if reason_key == "consensus_weak_share":
+        return "Nearby seeds and state counts do not agree strongly enough, so the strategy prefers no trade."
+    if reason_key == "consensus_flat":
+        return "The nearby-model consensus panel prefers no trade, so the strategy stands down."
+    if reason_key == "consensus_opposes":
+        return "The nearby-model consensus panel leans the other way, so the trade is blocked."
+    if reason_key == "consensus_unavailable":
+        return "Consensus diagnostics were not available, so the trade is blocked."
+    if reason_key == "consensus_hold_weak_share":
+        return "Consensus is too weak for a fresh entry, but the strategy is allowing an existing position to continue."
+    if reason_key == "consensus_hold_flat":
+        return "The consensus panel prefers no new trade, but the strategy is preserving an existing hold instead of force-flattening."
+    if reason_key == "consensus_hold_opposed":
+        return "Consensus now leans the other way, but this softer mode is preserving the existing hold instead of force-flattening."
+    if reason_key == "consensus_hold_unavailable":
+        return "Consensus diagnostics are unavailable, so new entries are blocked while existing exposure is allowed to continue."
     return f"Latest guardrail status: {reason_key.replace('_', ' ')}."
 
 
@@ -230,6 +252,10 @@ def build_metric_interpretation_rows(
     sharpe = float(metrics.get("sharpe", 0.0))
     annualized_return = float(metrics.get("annualized_return", 0.0))
     coverage = float(metrics.get("confidence_coverage", 0.0))
+    bar_win_rate = float(metrics.get("bar_win_rate", 0.0))
+    trade_win_rate = float(metrics.get("trade_win_rate", metrics.get("win_rate", 0.0)))
+    expectancy = float(metrics.get("expectancy", 0.0))
+    profit_factor = float(metrics.get("profit_factor", 0.0))
     trades = float(metrics.get("trades", 0.0))
     snapshot = build_trust_snapshot(
         metrics=metrics,
@@ -248,6 +274,9 @@ def build_metric_interpretation_rows(
     confirmation_status = str(latest_row.get("confirmation_status", "") or "")
     confirmation_direction = int(latest_row.get("confirmation_effective_direction", 0)) if "confirmation_effective_direction" in latest_row else 0
     confirmation_interval = str(latest_row.get("confirmation_interval", "")) if "confirmation_interval" in latest_row else ""
+    consensus_status = str(latest_row.get("consensus_status", "") or "")
+    consensus_direction = int(latest_row.get("consensus_effective_direction", 0)) if "consensus_effective_direction" in latest_row else 0
+    consensus_share = float(latest_row.get("consensus_effective_share", 0.0)) if "consensus_effective_share" in latest_row else 0.0
 
     if confirmation_status == "confirmed":
         confirmation_text = f"The {confirmation_interval} lane agrees with the current 4H direction."
@@ -261,6 +290,21 @@ def build_metric_interpretation_rows(
         confirmation_text = f"The {confirmation_interval} confirmation filter is present but not active on this bar."
     else:
         confirmation_text = ""
+
+    if consensus_status == "confirmed":
+        consensus_text = "Nearby seeds and state counts agree strongly enough with the current direction."
+    elif consensus_status == "weak_share":
+        consensus_text = "Nearby models do not agree strongly enough, so the trade is being filtered out as fragile."
+    elif consensus_status == "flat_consensus":
+        consensus_text = "The consensus panel prefers no trade, so the strategy stands down."
+    elif consensus_status == "opposed":
+        consensus_text = "The consensus panel leans the other way, so the strategy blocks the trade."
+    elif consensus_status == "unavailable":
+        consensus_text = "Consensus diagnostics were not available for this bar."
+    elif consensus_status:
+        consensus_text = "The consensus filter is present but not active on this bar."
+    else:
+        consensus_text = ""
 
     if posterior >= 0.9:
         posterior_text = "Very high state confidence, but remember this is confidence in the state label, not proof of edge."
@@ -317,6 +361,40 @@ def build_metric_interpretation_rows(
         trades_text = "Reasonable trade count for a first research pass."
     else:
         trades_text = "Healthy trade count, though execution assumptions still matter."
+
+    if bar_win_rate >= 0.6:
+        bar_win_rate_text = "A good share of active bars made money, but this can still overstate strategy quality if losses cluster into a few bad trades."
+    elif bar_win_rate >= 0.5:
+        bar_win_rate_text = "Slightly positive at the bar level. Useful, but less important than trade expectancy."
+    else:
+        bar_win_rate_text = "Weak at the bar level. Even before grouping into trades, the edge is not very clean."
+
+    if trade_win_rate >= 0.6:
+        trade_win_rate_text = "Strong trade hit rate on this sample, though it still needs enough trade count and a healthy payoff profile."
+    elif trade_win_rate >= 0.45:
+        trade_win_rate_text = "Middle-of-the-road trade hit rate. Profitability will depend on winners being larger than losers."
+    else:
+        trade_win_rate_text = "Low trade hit rate. The strategy needs unusually strong winner size to overcome this."
+
+    if expectancy > 0.01:
+        expectancy_text = "Positive average trade expectancy. Each closed trade has added meaningful value on average."
+    elif expectancy > 0.0:
+        expectancy_text = "Slightly positive trade expectancy. Encouraging, but still fragile."
+    elif expectancy > -0.01:
+        expectancy_text = "Near-flat expectancy. The strategy is not clearly earning enough per trade yet."
+    else:
+        expectancy_text = "Negative expectancy. The average closed trade is losing money."
+
+    if profit_factor >= 2.0:
+        profit_factor_text = "Strong payoff balance. Gross winners are comfortably outweighing gross losers."
+    elif profit_factor >= 1.2:
+        profit_factor_text = "Healthy enough payoff balance for a research candidate."
+    elif profit_factor >= 1.0:
+        profit_factor_text = "Barely above break-even. Small cost changes could erase the edge."
+    elif profit_factor > 0.0:
+        profit_factor_text = "Gross losers outweigh or nearly match gross winners."
+    else:
+        profit_factor_text = "No demonstrated payoff edge yet at the trade level."
 
     if robustness_median is None:
         robustness_text = "No usable robustness basket result was available."
@@ -405,9 +483,29 @@ def build_metric_interpretation_rows(
             "interpretation": coverage_text,
         },
         {
+            "metric": "Bar Win Rate",
+            "value": f"{bar_win_rate:.1%}",
+            "interpretation": bar_win_rate_text,
+        },
+        {
+            "metric": "Trade Win Rate",
+            "value": f"{trade_win_rate:.1%}",
+            "interpretation": trade_win_rate_text,
+        },
+        {
             "metric": "Trades",
             "value": f"{trades:.0f}",
             "interpretation": trades_text,
+        },
+        {
+            "metric": "Expectancy",
+            "value": f"{expectancy:.2%}",
+            "interpretation": expectancy_text,
+        },
+        {
+            "metric": "Profit Factor",
+            "value": f"{profit_factor:.2f}",
+            "interpretation": profit_factor_text,
         },
         {
             "metric": "Cross-Asset Robustness",
@@ -427,6 +525,16 @@ def build_metric_interpretation_rows(
                 "metric": "Daily Confirmation",
                 "value": f"{confirmation_status} ({position_label(confirmation_direction)})",
                 "interpretation": confirmation_text,
+            },
+        )
+    if consensus_status:
+        insertion_index = 6 if confirmation_status else 5
+        rows.insert(
+            insertion_index,
+            {
+                "metric": "Consensus Filter",
+                "value": f"{consensus_status} ({position_label(consensus_direction)}, {consensus_share:.0%})",
+                "interpretation": consensus_text,
             },
         )
     return pd.DataFrame(rows)
@@ -544,6 +652,21 @@ def build_control_interpretation_rows(
             "interpretation": confirmation_text,
         },
         {
+            "control": "Scoring Horizons",
+            "value": ", ".join(str(horizon) for horizon in strategy_config.scoring_horizons),
+            "interpretation": "These forward horizons vote on whether a state is truly tradable. Multiple horizons reduce one-window luck.",
+        },
+        {
+            "control": "Validation Shrinkage",
+            "value": f"{strategy_config.validation_shrinkage:.0f}",
+            "interpretation": "Higher shrinkage pulls thin-sample validation edges back toward zero, which makes the state labels more conservative.",
+        },
+        {
+            "control": "Consistent Horizons Required",
+            "value": f"{strategy_config.min_consistent_horizons}",
+            "interpretation": "This is the number of scored horizons that must agree before a state can be labeled as directional.",
+        },
+        {
             "control": "Daily Confirmation Filter",
             "value": "on" if strategy_config.require_daily_confirmation else "off",
             "interpretation": (
@@ -551,6 +674,29 @@ def build_control_interpretation_rows(
                 if strategy_config.require_daily_confirmation
                 else "Daily confirmation is off, so the 4H lane trades on its own."
             ),
+        },
+        {
+            "control": "Consensus Filter",
+            "value": "on" if strategy_config.require_consensus_confirmation else "off",
+            "interpretation": (
+                "Consensus confirmation is enforcing agreement across nearby seeds and state counts before the trade is allowed."
+                if strategy_config.require_consensus_confirmation
+                else "Consensus confirmation is off, so the selected model can trade without nearby-model agreement."
+            ),
+        },
+        {
+            "control": "Consensus Gate Mode",
+            "value": strategy_config.consensus_gate_mode,
+            "interpretation": (
+                "Hard mode fully blocks weak-consensus trades."
+                if strategy_config.consensus_gate_mode == "hard"
+                else "Entry-only mode blocks weak new entries but can keep an existing position alive through mild disagreement."
+            ),
+        },
+        {
+            "control": "Consensus Min Share",
+            "value": f"{strategy_config.consensus_min_share:.0%}",
+            "interpretation": "This is the minimum share of nearby models that must agree before the consensus filter allows a trade.",
         },
         {
             "control": "Min Hold",
