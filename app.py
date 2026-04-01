@@ -98,7 +98,7 @@ st.caption("FMP-backed BTC 4H preset with blind out-of-sample walk-forward diagn
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
+    st.caption("Default preset: BTC 4H `trend` research with daily confirmation. If consensus is enabled, the recommended gate mode is `entry_only`.")
     feature_pack_options = list(list_feature_packs())
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
@@ -124,7 +124,12 @@ with st.sidebar.form("controls"):
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
-    consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
+    consensus_gate_mode = st.selectbox(
+        "Consensus gate mode",
+        options=["hard", "entry_only"],
+        index=["hard", "entry_only"].index(StrategyConfig().consensus_gate_mode),
+        help=CONTROL_HELP["consensus_gate_mode"],
+    )
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
     cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=10.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
@@ -412,6 +417,8 @@ promotion_gates = build_promotion_gate_rows(
     interval=analysis["interval"],
     available_rows=analysis["available_rows"],
     walk_adjusted=analysis["walk_adjusted"],
+    fold_count=int(len(selected_result.fold_diagnostics)),
+    nested_holdout=nested_holdout,
 )
 promotion_snapshot = summarize_promotion_gates(promotion_gates)
 trust_snapshot = build_trust_snapshot(

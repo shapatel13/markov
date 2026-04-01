@@ -114,6 +114,7 @@ python -m streamlit run app.py
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
 - The app now includes a dedicated `Methodology` panel showing the walk-forward schedule, current friction assumptions, and promotion gates for the active run.
 - That same `Methodology` panel now includes a nested holdout check, where inner folds choose sweep settings and the most recent untouched outer folds judge whether those settings still work.
+- The current default operating profile is `BTCUSD` on `4hour` with the `trend` feature pack and daily confirmation enabled. If you turn on consensus gating, `entry_only` is the recommended default because it was safer without collapsing exposure as often as `hard` mode.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
 - The higher-timeframe defaults now approximate a `12 months train / 3 months validate / 3 months blind test` cadence on `4hour` and `1day`.
 - The optional daily confirmation filter acts as an execution veto, not a second alpha model. Daily neutrality is allowed; clear daily opposition blocks the `4hour` trade.

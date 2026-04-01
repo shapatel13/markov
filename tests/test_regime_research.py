@@ -680,12 +680,20 @@ def test_promotion_gates_require_more_than_positive_sharpe() -> None:
         interval="4hour",
         available_rows=900,
         walk_adjusted=True,
+        fold_count=2,
+        nested_holdout={"status": "insufficient_folds"},
     )
     snapshot = summarize_promotion_gates(gates)
 
     assert "pass" in set(gates["status"])
     assert "fail" in set(gates["status"])
     assert snapshot["verdict"] == "Not Ready"
+    assert "Enough Walk-Forward Folds" in set(gates["gate"])
+    assert "Nested Holdout Available" in set(gates["gate"])
+
+
+def test_default_strategy_config_prefers_entry_only_consensus_mode() -> None:
+    assert StrategyConfig().consensus_gate_mode == "entry_only"
 
 
 def test_ensure_results_tsv_writes_header(tmp_path: Path) -> None:
@@ -776,7 +784,10 @@ def test_consensus_overlay_blocks_when_share_is_too_low() -> None:
     frame["consensus_candidate"] = [1, 1, 1]
     frame["consensus_candidate_share"] = [0.55, 0.55, 0.55]
 
-    filtered, summary = apply_consensus_overlay(frame, StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67))
+    filtered, summary = apply_consensus_overlay(
+        frame,
+        StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67, consensus_gate_mode="hard"),
+    )
 
     assert filtered["signal_position"].eq(0).all()
     assert set(filtered["guardrail_reason"]) == {"consensus_weak_share"}
