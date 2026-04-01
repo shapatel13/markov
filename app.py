@@ -524,9 +524,22 @@ with trades_tab:
             st.dataframe(selected_result.trade_log, use_container_width=True, hide_index=True)
 
 with baselines_tab:
+    if not selected_result.baseline_comparison.empty:
+        best_baseline_row = selected_result.baseline_comparison.iloc[0]
+        best_baseline_name = str(best_baseline_row["baseline"])
+        best_baseline_sharpe = float(best_baseline_row["sharpe"])
+        strategy_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
+        if strategy_sharpe > best_baseline_sharpe:
+            st.success(
+                f"HMM currently beats the best simple baseline, `{best_baseline_name}`, on Sharpe ({strategy_sharpe:.2f} vs {best_baseline_sharpe:.2f})."
+            )
+        else:
+            st.warning(
+                f"Best simple baseline right now is `{best_baseline_name}` with Sharpe {best_baseline_sharpe:.2f}. The HMM needs to beat that bar to justify its complexity."
+            )
     st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
     st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
-    st.caption("These are simpler reference systems on the same out-of-sample slices. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
+    st.caption("These are simpler reference systems on the same out-of-sample slices, including tougher ATR and daily-trend references. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
