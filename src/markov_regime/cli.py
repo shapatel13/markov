@@ -63,7 +63,7 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--require-consensus-confirmation", action="store_true", help="Only execute exposure when nearby seeds and state counts agree.")
     parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="hard", help="How weak consensus should be handled when the consensus filter is enabled.")
     parser.add_argument("--consensus-min-share", type=float, default=0.67, help="Minimum consensus agreement share required before a trade is allowed.")
-    parser.add_argument("--cost-bps", type=float, default=2.0)
+    parser.add_argument("--cost-bps", type=float, default=10.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
     parser.add_argument("--slippage-bps", type=float, default=3.0)
     parser.add_argument("--impact-bps", type=float, default=2.0)

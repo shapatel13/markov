@@ -9,7 +9,7 @@ from markov_regime.config import Interval, StrategyConfig, WalkForwardConfig
 POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
-    "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline.",
+    "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline. Defaults now lean toward a 12-month train and 3-month blind test style on the higher timeframes.",
     "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
     "limit": "How many vendor bars to fetch. More history usually makes walk-forward conclusions less fragile.",
     "states": "Number of HMM regimes. Too few can blur distinct behavior; too many can over-segment noise.",
@@ -28,7 +28,7 @@ CONTROL_HELP: dict[str, str] = {
     "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
     "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
     "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue.",
-    "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
+    "cost_bps": "Trading fee assumption in basis points. Default is now 10 bps (0.10%) before spread and slippage to avoid unrealistically cheap crypto backtests.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
     "impact_bps": "Liquidity impact penalty in basis points. Higher values stress strategies that need more urgent execution.",
@@ -63,9 +63,9 @@ def _duration_label(interval: Interval, bars: int) -> str:
 
 def _sample_band(interval: Interval, available_rows: int) -> str:
     thresholds = {
-        "1hour": (1500, 4000),
-        "4hour": (700, 1500),
-        "1day": (500, 1200),
+        "1hour": (2500, 6000),
+        "4hour": (1800, 3200),
+        "1day": (500, 900),
     }
     thin, deeper = thresholds[interval]
     if available_rows < thin:
@@ -91,6 +91,12 @@ def _median_robustness_sharpe(robustness: pd.DataFrame) -> float | None:
     if ok_rows.empty:
         return None
     return float(ok_rows.median())
+
+
+def _best_baseline_sharpe(baseline_comparison: pd.DataFrame) -> float | None:
+    if baseline_comparison.empty or "sharpe" not in baseline_comparison.columns:
+        return None
+    return float(baseline_comparison["sharpe"].max())
 
 
 def first_sentence(text: str) -> str:
@@ -538,6 +544,110 @@ def build_metric_interpretation_rows(
             },
         )
     return pd.DataFrame(rows)
+
+
+def build_promotion_gate_rows(
+    *,
+    metrics: Mapping[str, float],
+    bootstrap: pd.DataFrame,
+    state_stability: pd.DataFrame,
+    robustness: pd.DataFrame,
+    baseline_comparison: pd.DataFrame,
+    interval: Interval,
+    available_rows: int,
+    walk_adjusted: bool,
+) -> pd.DataFrame:
+    sharpe = float(metrics.get("sharpe", 0.0))
+    trades = float(metrics.get("trades", 0.0))
+    sharpe_lower, _ = _bootstrap_interval(bootstrap, "sharpe")
+    stability = float(state_stability["stability_score"].median()) if not state_stability.empty else 0.0
+    robustness_median = _median_robustness_sharpe(robustness)
+    best_baseline_sharpe = _best_baseline_sharpe(baseline_comparison)
+    sample_band = _sample_band(interval, available_rows)
+
+    rows = [
+        {
+            "gate": "Positive OOS Sharpe",
+            "status": "pass" if sharpe > 0.0 else "fail",
+            "detail": f"Current out-of-sample Sharpe is {sharpe:.2f}.",
+        },
+        {
+            "gate": "Bootstrap Lower Bound Above Zero",
+            "status": "pass" if sharpe_lower is not None and sharpe_lower > 0.0 else "fail",
+            "detail": (
+                f"Sharpe lower confidence bound is {sharpe_lower:.2f}."
+                if sharpe_lower is not None
+                else "No Sharpe bootstrap interval was available."
+            ),
+        },
+        {
+            "gate": "Enough Closed Trades",
+            "status": "pass" if trades >= 5 else "fail",
+            "detail": f"Observed {trades:.0f} trades. Fewer than 5 trades is usually too thin to trust.",
+        },
+        {
+            "gate": "State Stability",
+            "status": "pass" if stability >= 0.5 else "fail",
+            "detail": f"Median state stability is {stability:.2f}.",
+        },
+        {
+            "gate": "Cross-Asset Robustness",
+            "status": "pass" if robustness_median is not None and robustness_median > 0.0 else "fail",
+            "detail": (
+                f"Median robustness Sharpe is {robustness_median:.2f}."
+                if robustness_median is not None
+                else "No successful robustness basket run was available."
+            ),
+        },
+        {
+            "gate": "Beats Best Simple Baseline",
+            "status": "pass" if best_baseline_sharpe is not None and sharpe > best_baseline_sharpe else "fail",
+            "detail": (
+                f"Best simple baseline Sharpe is {best_baseline_sharpe:.2f}."
+                if best_baseline_sharpe is not None
+                else "No baseline comparison was available."
+            ),
+        },
+        {
+            "gate": "No Auto-Reduced Windows",
+            "status": "pass" if not walk_adjusted else "fail",
+            "detail": "Requested windows ran as specified." if not walk_adjusted else "Windows had to be auto-reduced to fit the available sample.",
+        },
+        {
+            "gate": "Sample Depth",
+            "status": "pass" if sample_band != "thin" else "fail",
+            "detail": f"Current sample depth is classified as `{sample_band}` for {interval}.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def summarize_promotion_gates(gates: pd.DataFrame) -> dict[str, str]:
+    if gates.empty:
+        return {
+            "verdict": "Unavailable",
+            "severity": "warning",
+            "summary": "Promotion gates are unavailable for this run.",
+        }
+    passed = int((gates["status"] == "pass").sum())
+    total = int(len(gates))
+    if passed == total:
+        verdict = "Eligible"
+        severity = "success"
+        summary = "This run clears all promotion gates. It is strong enough to consider for default-candidate review."
+    elif passed >= max(total - 2, 1):
+        verdict = "Near Miss"
+        severity = "warning"
+        summary = "This run clears most promotion gates, but it still has important weak spots before it should influence defaults."
+    else:
+        verdict = "Not Ready"
+        severity = "error"
+        summary = "This run does not clear enough promotion gates to justify changing defaults. Treat it as research only."
+    return {
+        "verdict": verdict,
+        "severity": severity,
+        "summary": summary + f" Passed {passed} of {total} gates.",
+    }
 
 
 def build_control_interpretation_rows(

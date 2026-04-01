@@ -24,7 +24,9 @@ from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feat
 from markov_regime.interpretation import (
     build_control_interpretation_rows,
     build_metric_interpretation_rows,
+    build_promotion_gate_rows,
     build_trust_snapshot,
+    summarize_promotion_gates,
 )
 from markov_regime.research import (
     ResearchProgram,
@@ -532,11 +534,16 @@ def test_bars_per_year_supports_4hour_crypto_calendar() -> None:
 
 def test_default_walk_forward_config_prefers_higher_timeframe_windows() -> None:
     four_hour = default_walk_forward_config("4hour")
+    one_day = default_walk_forward_config("1day")
     one_hour = default_walk_forward_config("1hour")
 
-    assert four_hour.train_bars < one_hour.train_bars
-    assert four_hour.validate_bars < one_hour.validate_bars
-    assert four_hour.test_bars < one_hour.test_bars
+    assert four_hour.train_bars == 365 * 6
+    assert four_hour.validate_bars == 90 * 6
+    assert four_hour.test_bars == 90 * 6
+    assert one_day.train_bars == 365
+    assert one_day.validate_bars == 90
+    assert one_day.test_bars == 90
+    assert one_hour.train_bars == 720
 
 
 def test_research_program_round_trip(tmp_path: Path) -> None:
@@ -639,6 +646,24 @@ def test_control_interpretation_describes_cautious_filters() -> None:
     assert "balanced" in lookup.loc["Posterior Threshold", "interpretation"].lower()
     assert "sticky" in lookup.loc["Min Hold", "interpretation"].lower()
     assert "anti-whipsaw" in lookup.loc["Cooldown", "interpretation"].lower()
+
+
+def test_promotion_gates_require_more_than_positive_sharpe() -> None:
+    gates = build_promotion_gate_rows(
+        metrics={"sharpe": 1.2, "trades": 3.0},
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -0.4, "upper": 2.5}]),
+        state_stability=pd.DataFrame([{"canonical_state": 0, "stability_score": 0.42}]),
+        robustness=pd.DataFrame([{"symbol": "BTCUSD", "status": "ok", "sharpe": -0.1}]),
+        baseline_comparison=pd.DataFrame([{"baseline": "ema_trend", "sharpe": 0.4}]),
+        interval="4hour",
+        available_rows=900,
+        walk_adjusted=True,
+    )
+    snapshot = summarize_promotion_gates(gates)
+
+    assert "pass" in set(gates["status"])
+    assert "fail" in set(gates["status"])
+    assert snapshot["verdict"] == "Not Ready"
 
 
 def test_ensure_results_tsv_writes_header(tmp_path: Path) -> None:
@@ -854,6 +879,8 @@ def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataF
     assert "sharpe" in result.metrics
     assert "trade_win_rate" in result.metrics
     assert "sharpe" in result.benchmark_metrics
+    assert result.predictions["is_blind_oos"].all()
+    assert set(result.predictions["oos_segment"]) == {"blind_test"}
 
 
 def test_parse_symbol_list_handles_commas_and_spacing() -> None:
@@ -899,4 +926,5 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)
     assert manifest["metadata"]["feature_pack"] == "baseline"
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
+    assert manifest["methodology"]["performance_stitching"] == "blind_test_windows_only"

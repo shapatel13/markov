@@ -22,8 +22,10 @@ from markov_regime.interpretation import (
     CONTROL_HELP,
     build_control_interpretation_rows,
     build_metric_interpretation_rows,
+    build_promotion_gate_rows,
     build_trust_snapshot,
     first_sentence,
+    summarize_promotion_gates,
 )
 from markov_regime.research import run_feature_pack_comparison, run_timeframe_comparison
 from markov_regime.reporting import export_signal_report
@@ -87,7 +89,7 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("BTC 4H preset with daily confirmation, walk-forward HMM diagnostics, explicit guardrails, and confidence intervals.")
+st.caption("FMP-backed BTC 4H preset with blind out-of-sample walk-forward diagnostics, explicit guardrails, and conservative research framing.")
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
@@ -119,7 +121,7 @@ with st.sidebar.form("controls"):
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
     consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
-    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
+    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=10.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
     slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
     impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5, help=CONTROL_HELP["impact_bps"])
@@ -383,6 +385,17 @@ control_interpretation = build_control_interpretation_rows(
     walk_config=analysis["walk_config"],
     strategy_config=analysis["strategy_config"],
 )
+promotion_gates = build_promotion_gate_rows(
+    metrics=selected_result.metrics,
+    bootstrap=selected_result.bootstrap,
+    state_stability=selected_result.state_stability,
+    robustness=robustness,
+    baseline_comparison=selected_result.baseline_comparison,
+    interval=analysis["interval"],
+    available_rows=analysis["available_rows"],
+    walk_adjusted=analysis["walk_adjusted"],
+)
+promotion_snapshot = summarize_promotion_gates(promotion_gates)
 trust_snapshot = build_trust_snapshot(
     metrics=selected_result.metrics,
     bootstrap=selected_result.bootstrap,
@@ -434,7 +447,8 @@ if analysis["confirmation_enabled"]:
     st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
 if analysis["strategy_config"].require_consensus_confirmation:
     st.caption("Consensus Filter shows whether nearby seeds and state counts agree strongly enough with the current direction to allow exposure.")
-st.caption(f"Latest guardrail status: `{guardrail_text}` | Data source: `{analysis['data_url']}`")
+st.caption("Headline metrics are stitched only from blind test windows. Training and validation slices are excluded from performance totals.")
+st.caption(f"Latest guardrail status: `{guardrail_text}` | Data provider: `Financial Modeling Prep` | Data request: `{analysis['data_url']}`")
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
     st.caption(f"Daily confirmation source: `{analysis['confirmation_data_url']}`")
 st.caption(f"Feature pack: `{analysis['feature_pack']}`")
@@ -476,8 +490,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, trades_tab, baselines_tab, interpretation_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Trades", "Baselines", "Interpretation", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, trades_tab, baselines_tab, interpretation_tab, methodology_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Trades", "Baselines", "Interpretation", "Methodology", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -531,6 +545,74 @@ with interpretation_tab:
     st.subheader("Current Control Meanings")
     st.dataframe(control_interpretation, use_container_width=True, hide_index=True)
     st.caption("These rows explain what the current settings are encouraging the strategy to do, so you can tell whether results are coming from signal quality or just stricter filters.")
+
+with methodology_tab:
+    st.subheader("Methodology Summary")
+    methodology_rows = pd.DataFrame(
+        [
+            {
+                "component": "Data Provider",
+                "value": "Financial Modeling Prep",
+                "interpretation": "Current app default. Keep the provider fixed during a run so data-source changes do not masquerade as strategy improvements.",
+            },
+            {
+                "component": "Performance Stitching",
+                "value": "Blind test windows only",
+                "interpretation": "Displayed equity and metrics are stitched only from test slices that were not used in fitting or state labeling.",
+            },
+            {
+                "component": "Walk-Forward Layout",
+                "value": (
+                    f"train={analysis['walk_config'].train_bars}, purge={analysis['walk_config'].purge_bars}, "
+                    f"validate={analysis['walk_config'].validate_bars}, embargo={analysis['walk_config'].embargo_bars}, "
+                    f"test={analysis['walk_config'].test_bars}, stride={analysis['walk_config'].refit_stride_bars}"
+                ),
+                "interpretation": "Each fold retrains on the train slice, labels states on the validate slice, and only then scores the blind test slice.",
+            },
+            {
+                "component": "Auto-Reduced Windows",
+                "value": "Yes" if analysis["walk_adjusted"] else "No",
+                "interpretation": "If this says `Yes`, the requested windows did not fit the sample and the run is less methodologically strict.",
+            },
+            {
+                "component": "Cost Assumptions",
+                "value": (
+                    f"fee={analysis['strategy_config'].cost_bps:.1f}bps, spread={analysis['strategy_config'].spread_bps:.1f}bps, "
+                    f"slippage={analysis['strategy_config'].slippage_bps:.1f}bps, impact={analysis['strategy_config'].impact_bps:.1f}bps"
+                ),
+                "interpretation": "Fees, spread, slippage, and liquidity impact are all charged before reporting strategy returns.",
+            },
+        ]
+    )
+    st.dataframe(methodology_rows, use_container_width=True, hide_index=True)
+    fold_schedule = (
+        selected_result.predictions.loc[
+            :,
+            [
+                "fold_id",
+                "train_start_time",
+                "train_end_time",
+                "validate_start_time",
+                "validate_end_time",
+                "test_start_time",
+                "test_end_time",
+            ],
+        ]
+        .drop_duplicates(subset=["fold_id"])
+        .sort_values("fold_id")
+        .reset_index(drop=True)
+    )
+    st.subheader("Fold Schedule")
+    st.dataframe(fold_schedule, use_container_width=True, hide_index=True)
+    if promotion_snapshot["severity"] == "success":
+        st.success(promotion_snapshot["summary"])
+    elif promotion_snapshot["severity"] == "error":
+        st.error(promotion_snapshot["summary"])
+    else:
+        st.warning(promotion_snapshot["summary"])
+    st.subheader("Promotion Gates")
+    st.dataframe(promotion_gates, use_container_width=True, hide_index=True)
+    st.caption("These gates are intentionally stricter than a simple positive Sharpe. A run should clear them before it influences defaults or gets treated as a credible candidate.")
 
 with confirmation_tab:
     if analysis["confirmation_enabled"]:
@@ -586,6 +668,17 @@ with stability_tab:
     st.dataframe(selected_result.forward_returns, use_container_width=True)
 
 with sensitivity_tab:
+    st.warning(
+        "Parameter sweeps here are diagnostic only. They replay alternative thresholds on the already-observed out-of-sample path, so they help us understand sensitivity but do not qualify as blind model selection."
+    )
+    if not sweep_results.empty:
+        top_row = sweep_results.iloc[0]
+        st.info(
+            "Top diagnostic sweep row: "
+            f"Sharpe {float(top_row['sharpe']):.2f}, posterior {float(top_row['posterior_threshold']):.2f}, "
+            f"min hold {int(top_row['min_hold_bars'])}, cooldown {int(top_row['cooldown_bars'])}, confirmations {int(top_row['required_confirmations'])}. "
+            "Do not promote this row without separate holdout confirmation."
+        )
     metric_choice = st.selectbox(
         "Sensitivity metric",
         options=["sharpe", "annualized_return", "max_drawdown", "confidence_coverage"],
