@@ -25,6 +25,8 @@ CONTROL_HELP: dict[str, str] = {
     "required_confirmations": "Consecutive qualifying bars required before a new position can open. Higher values are stricter.",
     "confidence_gap": "Minimum gap between the top two posterior state probabilities. Higher values force cleaner separation between competing regimes.",
     "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
+    "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
+    "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
     "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
@@ -255,6 +257,9 @@ def build_metric_interpretation_rows(
     confirmation_status = str(latest_row.get("confirmation_status", "") or "")
     confirmation_direction = int(latest_row.get("confirmation_effective_direction", 0)) if "confirmation_effective_direction" in latest_row else 0
     confirmation_interval = str(latest_row.get("confirmation_interval", "")) if "confirmation_interval" in latest_row else ""
+    consensus_status = str(latest_row.get("consensus_status", "") or "")
+    consensus_direction = int(latest_row.get("consensus_effective_direction", 0)) if "consensus_effective_direction" in latest_row else 0
+    consensus_share = float(latest_row.get("consensus_effective_share", 0.0)) if "consensus_effective_share" in latest_row else 0.0
 
     if confirmation_status == "confirmed":
         confirmation_text = f"The {confirmation_interval} lane agrees with the current 4H direction."
@@ -268,6 +273,21 @@ def build_metric_interpretation_rows(
         confirmation_text = f"The {confirmation_interval} confirmation filter is present but not active on this bar."
     else:
         confirmation_text = ""
+
+    if consensus_status == "confirmed":
+        consensus_text = "Nearby seeds and state counts agree strongly enough with the current direction."
+    elif consensus_status == "weak_share":
+        consensus_text = "Nearby models do not agree strongly enough, so the trade is being filtered out as fragile."
+    elif consensus_status == "flat_consensus":
+        consensus_text = "The consensus panel prefers no trade, so the strategy stands down."
+    elif consensus_status == "opposed":
+        consensus_text = "The consensus panel leans the other way, so the strategy blocks the trade."
+    elif consensus_status == "unavailable":
+        consensus_text = "Consensus diagnostics were not available for this bar."
+    elif consensus_status:
+        consensus_text = "The consensus filter is present but not active on this bar."
+    else:
+        consensus_text = ""
 
     if posterior >= 0.9:
         posterior_text = "Very high state confidence, but remember this is confidence in the state label, not proof of edge."
@@ -490,6 +510,16 @@ def build_metric_interpretation_rows(
                 "interpretation": confirmation_text,
             },
         )
+    if consensus_status:
+        insertion_index = 6 if confirmation_status else 5
+        rows.insert(
+            insertion_index,
+            {
+                "metric": "Consensus Filter",
+                "value": f"{consensus_status} ({position_label(consensus_direction)}, {consensus_share:.0%})",
+                "interpretation": consensus_text,
+            },
+        )
     return pd.DataFrame(rows)
 
 
@@ -627,6 +657,20 @@ def build_control_interpretation_rows(
                 if strategy_config.require_daily_confirmation
                 else "Daily confirmation is off, so the 4H lane trades on its own."
             ),
+        },
+        {
+            "control": "Consensus Filter",
+            "value": "on" if strategy_config.require_consensus_confirmation else "off",
+            "interpretation": (
+                "Consensus confirmation is enforcing agreement across nearby seeds and state counts before the trade is allowed."
+                if strategy_config.require_consensus_confirmation
+                else "Consensus confirmation is off, so the selected model can trade without nearby-model agreement."
+            ),
+        },
+        {
+            "control": "Consensus Min Share",
+            "value": f"{strategy_config.consensus_min_share:.0%}",
+            "interpretation": "This is the minimum share of nearby models that must agree before the consensus filter allows a trade.",
         },
         {
             "control": "Min Hold",

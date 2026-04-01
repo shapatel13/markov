@@ -8,7 +8,7 @@ import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
-from markov_regime.consensus import build_consensus_timeline, summarize_consensus
+from markov_regime.consensus import apply_consensus_overlay, build_consensus_timeline, summarize_consensus
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
 from markov_regime.data import normalize_symbol
@@ -77,6 +77,8 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
         "mean_reversion",
         "vol_surface",
         "regime_mix_v2",
+        "trend_context",
+        "regime_context",
     }.issubset(set(list_feature_packs()))
 
     trend_columns = get_feature_columns("trend")
@@ -87,15 +89,23 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
     mean_reversion_frame = build_feature_frame(synthetic_prices, feature_columns=mean_reversion_columns)
     vol_surface_columns = get_feature_columns("vol_surface")
     vol_surface_frame = build_feature_frame(synthetic_prices, feature_columns=vol_surface_columns)
+    trend_context_columns = get_feature_columns("trend_context")
+    trend_context_frame = build_feature_frame(synthetic_prices, feature_columns=trend_context_columns)
+    regime_context_columns = get_feature_columns("regime_context")
+    regime_context_frame = build_feature_frame(synthetic_prices, feature_columns=regime_context_columns)
 
     assert "ema_gap_24" in trend_columns
     assert "adx_14" in trend_strength_columns
     assert "rsi_14" in mean_reversion_columns
     assert "parkinson_vol_24" in vol_surface_columns
+    assert "daily_trend_20" in trend_context_columns
+    assert "daily_adx_14" in regime_context_columns
     assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
     assert trend_strength_frame.loc[:, list(trend_strength_columns)].isna().sum().sum() == 0
     assert mean_reversion_frame.loc[:, list(mean_reversion_columns)].isna().sum().sum() == 0
     assert vol_surface_frame.loc[:, list(vol_surface_columns)].isna().sum().sum() == 0
+    assert trend_context_frame.loc[:, list(trend_context_columns)].isna().sum().sum() == 0
+    assert regime_context_frame.loc[:, list(regime_context_columns)].isna().sum().sum() == 0
 
 
 def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.DataFrame) -> None:
@@ -114,6 +124,14 @@ def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.Da
         "realized_kurt_24",
         "parkinson_vol_24",
         "garman_klass_vol_24",
+        "daily_trend_5",
+        "daily_trend_20",
+        "daily_ema_gap_20",
+        "daily_rsi_14",
+        "daily_bollinger_z_20",
+        "daily_adx_14",
+        "daily_di_spread_14",
+        "daily_range_ratio_10",
     )
     frame = build_feature_frame(synthetic_prices, feature_columns=advanced_columns)
 
@@ -615,6 +633,31 @@ def test_consensus_timeline_computes_majority_votes() -> None:
     assert timeline["position_consensus_share"].tolist()[0] == 2 / 3
     assert not summary.empty
     assert "Latest Held Consensus" in set(summary["metric"])
+
+
+def test_consensus_overlay_blocks_when_share_is_too_low() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["consensus_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="4h")
+    frame["consensus_position"] = [1, 1, 1]
+    frame["consensus_position_share"] = [0.55, 0.55, 0.55]
+    frame["consensus_candidate"] = [1, 1, 1]
+    frame["consensus_candidate_share"] = [0.55, 0.55, 0.55]
+
+    filtered, summary = apply_consensus_overlay(frame, StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67))
+
+    assert filtered["signal_position"].eq(0).all()
+    assert set(filtered["guardrail_reason"]) == {"consensus_weak_share"}
+    assert "weak_share" in set(summary["consensus_status"])
 
 
 def test_nested_holdout_evaluation_returns_outer_metrics() -> None:

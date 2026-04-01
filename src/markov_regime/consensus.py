@@ -5,10 +5,19 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
+from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, default_walk_forward_config
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import DataFetchResult, fetch_price_data
 from markov_regime.features import build_feature_frame
+from markov_regime.strategy import (
+    build_buy_and_hold_frame,
+    build_trade_table,
+    compute_metrics,
+    estimate_execution_cost_bps,
+    stress_test_transaction_costs,
+    summarize_trade_table,
+)
 from markov_regime.walkforward import WalkForwardResult, run_walk_forward, suggest_walk_forward_config
 
 
@@ -238,6 +247,199 @@ def summarize_consensus(members: pd.DataFrame, timeline: pd.DataFrame) -> pd.Dat
         },
     ]
     return pd.DataFrame(rows)
+
+
+def align_consensus_predictions(primary_predictions: pd.DataFrame, consensus_timeline: pd.DataFrame) -> pd.DataFrame:
+    if consensus_timeline.empty:
+        return primary_predictions
+    right = consensus_timeline.sort_values("timestamp").rename(
+        columns={
+            "timestamp": "consensus_timestamp",
+            "position_consensus": "consensus_position",
+            "position_consensus_share": "consensus_position_share",
+            "candidate_consensus": "consensus_candidate",
+            "candidate_consensus_share": "consensus_candidate_share",
+            "member_count": "consensus_member_count",
+        }
+    )
+    merged = pd.merge_asof(
+        primary_predictions.sort_values("timestamp"),
+        right.loc[
+            :,
+            [
+                "consensus_timestamp",
+                "consensus_position",
+                "consensus_position_share",
+                "consensus_candidate",
+                "consensus_candidate_share",
+                "consensus_member_count",
+            ],
+        ],
+        left_on="timestamp",
+        right_on="consensus_timestamp",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    return merged
+
+
+def _recompute_bars_held(signal_position: pd.Series) -> pd.Series:
+    bars_held: list[int] = []
+    current_position = 0
+    held = 0
+    for position in signal_position.fillna(0.0).astype(int):
+        if position != 0:
+            held = held + 1 if position == current_position else 1
+        else:
+            held = 0
+        current_position = position
+        bars_held.append(held)
+    return pd.Series(bars_held, index=signal_position.index, dtype="int64")
+
+
+def _consensus_reason(status: str) -> str:
+    return {
+        "confirmed": "",
+        "weak_share": "consensus_weak_share",
+        "flat_consensus": "consensus_flat",
+        "opposed": "consensus_opposes",
+        "unavailable": "consensus_unavailable",
+        "no_primary_signal": "",
+    }.get(status, "")
+
+
+def apply_consensus_overlay(signal_frame: pd.DataFrame, config: StrategyConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+    required_columns = {"consensus_position", "consensus_position_share", "consensus_candidate", "consensus_candidate_share"}
+    if not config.require_consensus_confirmation or not required_columns.issubset(signal_frame.columns):
+        return signal_frame, pd.DataFrame()
+
+    overlay = signal_frame.copy()
+    overlay["consensus_base_signal_position"] = overlay["signal_position"].astype(int)
+    overlay["consensus_base_candidate_action"] = overlay["candidate_action"].astype(int)
+    overlay["consensus_base_guardrail_reason"] = overlay["guardrail_reason"].fillna("")
+    overlay["consensus_position"] = overlay["consensus_position"].fillna(0.0).astype(int)
+    overlay["consensus_candidate"] = overlay["consensus_candidate"].fillna(0.0).astype(int)
+    overlay["consensus_position_share"] = overlay["consensus_position_share"].fillna(0.0).astype(float)
+    overlay["consensus_candidate_share"] = overlay["consensus_candidate_share"].fillna(0.0).astype(float)
+
+    requested_direction = np.where(
+        overlay["consensus_base_candidate_action"] != 0,
+        overlay["consensus_base_candidate_action"],
+        overlay["consensus_base_signal_position"],
+    ).astype(int)
+    use_candidate_consensus = overlay["consensus_base_candidate_action"] != 0
+    consensus_direction = np.where(use_candidate_consensus, overlay["consensus_candidate"], overlay["consensus_position"]).astype(int)
+    consensus_share = np.where(use_candidate_consensus, overlay["consensus_candidate_share"], overlay["consensus_position_share"]).astype(float)
+    overlay["consensus_requested_direction"] = requested_direction
+    overlay["consensus_effective_direction"] = consensus_direction
+    overlay["consensus_effective_share"] = consensus_share
+
+    available = overlay["consensus_timestamp"].notna()
+    no_primary_signal = requested_direction == 0
+    confirmed = (
+        (requested_direction != 0)
+        & available
+        & (consensus_share >= config.consensus_min_share)
+        & (consensus_direction != 0)
+        & (np.sign(requested_direction) == np.sign(consensus_direction))
+    )
+    weak_share = (requested_direction != 0) & available & (consensus_share < config.consensus_min_share)
+    flat_consensus = (requested_direction != 0) & available & (consensus_share >= config.consensus_min_share) & (consensus_direction == 0)
+    opposed = (
+        (requested_direction != 0)
+        & available
+        & (consensus_share >= config.consensus_min_share)
+        & (consensus_direction != 0)
+        & (np.sign(requested_direction) != np.sign(consensus_direction))
+    )
+    unavailable = (requested_direction != 0) & ~available
+
+    overlay["consensus_status"] = np.select(
+        [confirmed, weak_share, flat_consensus, opposed, unavailable, no_primary_signal],
+        ["confirmed", "weak_share", "flat_consensus", "opposed", "unavailable", "no_primary_signal"],
+        default="no_primary_signal",
+    )
+    overlay["consensus_reason"] = overlay["consensus_status"].map(_consensus_reason)
+
+    allow_mask = overlay["consensus_status"] == "confirmed"
+    overlay["signal_position"] = np.where(allow_mask, overlay["consensus_base_signal_position"], 0).astype(int)
+    overlay["candidate_action"] = np.where(allow_mask, overlay["consensus_base_candidate_action"], 0).astype(int)
+    overlay["guardrail_reason"] = np.where(
+        overlay["consensus_status"].isin(["weak_share", "flat_consensus", "opposed", "unavailable"]),
+        overlay["consensus_reason"],
+        overlay["consensus_base_guardrail_reason"],
+    )
+    overlay["guardrail_reason"] = pd.Series(overlay["guardrail_reason"], index=overlay.index).fillna("").astype(str)
+    overlay["bars_held"] = _recompute_bars_held(overlay["signal_position"])
+    overlay["turnover"] = overlay["signal_position"].diff().abs().fillna(abs(int(overlay["signal_position"].iloc[0])))
+    overlay["gross_strategy_return"] = overlay["signal_position"].shift(1).fillna(0.0) * overlay["bar_return"]
+    overlay["execution_cost_bps"] = estimate_execution_cost_bps(overlay, config)
+    overlay["transaction_cost"] = overlay["turnover"] * (overlay["execution_cost_bps"] / 10_000.0)
+    overlay["net_strategy_return"] = overlay["gross_strategy_return"] - overlay["transaction_cost"]
+    overlay["asset_wealth"] = (1.0 + overlay["bar_return"]).cumprod()
+    overlay["strategy_wealth"] = (1.0 + overlay["net_strategy_return"]).cumprod()
+
+    requested_mask = overlay["consensus_requested_direction"] != 0
+    summary = (
+        overlay.groupby("consensus_status", dropna=False)
+        .agg(
+            bars=("timestamp", "size"),
+            requested_bars=("consensus_requested_direction", lambda values: int((values != 0).sum())),
+        )
+        .reset_index()
+    )
+    summary["share_of_bars"] = summary["bars"] / max(len(overlay), 1)
+    summary["share_of_requested"] = summary["requested_bars"] / max(int(requested_mask.sum()), 1)
+    return overlay, summary.sort_values(["requested_bars", "bars"], ascending=False).reset_index(drop=True)
+
+
+def apply_consensus_confirmation(
+    primary_result: WalkForwardResult,
+    diagnostics: ConsensusDiagnostics,
+    *,
+    interval: Interval,
+    strategy_config: StrategyConfig,
+) -> WalkForwardResult:
+    if not strategy_config.require_consensus_confirmation:
+        return primary_result
+    aligned = align_consensus_predictions(primary_result.predictions, diagnostics.timeline)
+    confirmed_predictions, consensus_summary = apply_consensus_overlay(aligned, strategy_config)
+    updated_metrics = compute_metrics(confirmed_predictions, interval)
+    updated_cost_stress = stress_test_transaction_costs(confirmed_predictions, strategy_config.cost_grid, interval, strategy_config)
+    updated_bootstrap = block_bootstrap_confidence_intervals(
+        confirmed_predictions["net_strategy_return"],
+        interval=interval,
+        block_length=max(strategy_config.signal_horizon * 2, 8),
+    )
+    updated_trade_log = build_trade_table(confirmed_predictions)
+    updated_trade_summary = summarize_trade_table(updated_trade_log)
+    updated_fold_diagnostics = primary_result.fold_diagnostics.copy()
+    for fold_id, fold_frame in confirmed_predictions.groupby("fold_id", sort=True):
+        metrics = compute_metrics(fold_frame, interval)
+        for metric_name, metric_value in metrics.items():
+            if metric_name in updated_fold_diagnostics.columns:
+                updated_fold_diagnostics.loc[updated_fold_diagnostics["fold_id"] == fold_id, metric_name] = metric_value
+    guardrail_summary = (
+        confirmed_predictions.assign(guardrail_reason=lambda frame: frame["guardrail_reason"].replace("", "accepted"))
+        .groupby("guardrail_reason", dropna=False)
+        .size()
+        .rename("bars")
+        .reset_index()
+    )
+    guardrail_summary["share"] = guardrail_summary["bars"] / max(len(confirmed_predictions), 1)
+    return replace(
+        primary_result,
+        predictions=confirmed_predictions,
+        fold_diagnostics=updated_fold_diagnostics,
+        metrics=updated_metrics,
+        benchmark_metrics=compute_metrics(build_buy_and_hold_frame(confirmed_predictions), interval),
+        cost_stress=updated_cost_stress,
+        bootstrap=updated_bootstrap,
+        trade_log=updated_trade_log,
+        trade_summary=updated_trade_summary,
+        guardrail_summary=guardrail_summary.sort_values("bars", ascending=False).reset_index(drop=True),
+        consensus_summary=consensus_summary,
+    )
 
 
 def run_consensus_diagnostics(

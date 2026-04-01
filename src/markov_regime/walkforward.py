@@ -56,6 +56,7 @@ class WalkForwardResult:
     confirmation_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     trade_log: pd.DataFrame = field(default_factory=pd.DataFrame)
     trade_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    consensus_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def suggest_walk_forward_config(

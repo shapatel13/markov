@@ -80,7 +80,7 @@ INTERVAL_PRIORITY: dict[Interval, int] = {"4hour": 0, "1day": 1, "1hour": 2}
 class ResearchProgram:
     symbol: str = "BTCUSD"
     intervals: tuple[Interval, ...] = DEFAULT_RESEARCH_INTERVALS
-    feature_packs: tuple[str, ...] = ("baseline", "trend", "volatility", "regime_mix")
+    feature_packs: tuple[str, ...] = ("baseline", "trend", "volatility", "regime_mix", "trend_context", "regime_context")
     limit: int = 5000
     robustness_symbols: tuple[str, ...] = ("BTCUSD", "ETHUSD", "SOLUSD")
     state_counts: tuple[int, ...] = (5, 6, 7, 8, 9)

@@ -114,6 +114,37 @@ FEATURE_PACKS: dict[str, tuple[str, ...]] = {
         "distance_to_vwap_24",
         "volume_z_24",
     ),
+    "trend_context": (
+        "log_return_1",
+        "log_return_3",
+        "trend_12",
+        "trend_24",
+        "adx_14",
+        "ema_gap_24",
+        "daily_trend_5",
+        "daily_trend_20",
+        "daily_ema_gap_20",
+        "daily_rsi_14",
+        "daily_di_spread_14",
+        "volume_z_24",
+    ),
+    "regime_context": (
+        "log_return_1",
+        "log_return_3",
+        "trend_12",
+        "trend_24",
+        "vol_12",
+        "vol_24",
+        "adx_14",
+        "bollinger_z_20",
+        "daily_trend_20",
+        "daily_ema_gap_20",
+        "daily_rsi_14",
+        "daily_bollinger_z_20",
+        "daily_adx_14",
+        "daily_range_ratio_10",
+        "volume_z_24",
+    ),
 }
 
 FEATURE_COLUMNS: tuple[str, ...] = FEATURE_PACKS["baseline"]
@@ -221,6 +252,39 @@ def _compute_garman_klass_volatility(frame: pd.DataFrame, window: int = 24) -> p
     return np.sqrt(estimator.clip(lower=0.0))
 
 
+def _is_intraday(frame: pd.DataFrame) -> bool:
+    deltas = frame["timestamp"].sort_values().diff().dropna()
+    if deltas.empty:
+        return False
+    return bool(deltas.median() < pd.Timedelta(days=1))
+
+
+def _compute_daily_context_features(frame: pd.DataFrame) -> pd.DataFrame:
+    daily = (
+        frame.assign(day=lambda item: item["timestamp"].dt.floor("D"))
+        .groupby("day", as_index=False)
+        .agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "sum"),
+        )
+        .rename(columns={"day": "timestamp"})
+    )
+    daily_range_ratio = (daily["high"] - daily["low"]) / daily["close"].replace(0.0, np.nan)
+    daily["daily_trend_5"] = daily["close"].pct_change(5)
+    daily["daily_trend_20"] = daily["close"].pct_change(20)
+    daily["daily_ema_gap_20"] = daily["close"] / daily["close"].ewm(span=20, adjust=False).mean() - 1.0
+    daily["daily_rsi_14"] = _compute_rsi(daily["close"], 14)
+    daily["daily_bollinger_z_20"], daily_bandwidth = _compute_bollinger_features(daily["close"], 20)
+    daily["daily_bollinger_bandwidth_20"] = daily_bandwidth
+    daily["daily_adx_14"], daily_plus_di, daily_minus_di = _compute_directional_indicators(daily, 14)
+    daily["daily_di_spread_14"] = daily_plus_di - daily_minus_di
+    daily["daily_range_ratio_10"] = daily_range_ratio.rolling(10).mean()
+    return daily
+
+
 def build_feature_frame(
     prices: pd.DataFrame,
     feature_columns: tuple[str, ...] = FEATURE_COLUMNS,
@@ -229,6 +293,7 @@ def build_feature_frame(
         raise ValueError("Cannot build features from an empty price frame.")
 
     frame = prices.copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     frame["bar_return"] = frame["close"].pct_change().fillna(0.0)
     log_close = np.log(frame["close"])
     log_return_1 = log_close.diff(1)
@@ -262,6 +327,17 @@ def build_feature_frame(
     frame["realized_kurt_24"] = log_return_1.rolling(24).kurt()
     frame["parkinson_vol_24"] = _compute_parkinson_volatility(frame, 24)
     frame["garman_klass_vol_24"] = _compute_garman_klass_volatility(frame, 24)
+
+    daily_context = _compute_daily_context_features(frame)
+    daily_context_columns = [column for column in daily_context.columns if column.startswith("daily_")]
+    if _is_intraday(frame):
+        daily_context = daily_context.copy()
+        daily_context.loc[:, daily_context_columns] = daily_context.loc[:, daily_context_columns].shift(1)
+    frame = frame.assign(day=lambda item: item["timestamp"].dt.floor("D")).merge(
+        daily_context.loc[:, ["timestamp", *daily_context_columns]].rename(columns={"timestamp": "day"}),
+        on="day",
+        how="left",
+    ).drop(columns="day")
 
     for horizon in FORWARD_HORIZONS:
         frame[f"forward_return_{horizon}"] = frame["close"].shift(-horizon) / frame["close"] - 1.0

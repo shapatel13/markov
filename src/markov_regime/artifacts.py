@@ -95,6 +95,8 @@ def write_run_artifact_bundle(
         files["trade_log_csv"] = _write_table(selected_result.trade_log, root / "trade_log.csv")
     if selected_result.trade_summary is not None and not selected_result.trade_summary.empty:
         files["trade_summary_csv"] = _write_table(selected_result.trade_summary, root / "trade_summary.csv")
+    if selected_result.consensus_summary is not None and not selected_result.consensus_summary.empty:
+        files["consensus_gate_summary_csv"] = _write_table(selected_result.consensus_summary, root / "consensus_gate_summary.csv")
     if selected_result.confirmation_summary is not None and not selected_result.confirmation_summary.empty:
         files["confirmation_summary_csv"] = _write_table(selected_result.confirmation_summary, root / "confirmation_summary.csv")
     files["sweep_results_csv"] = _write_table(sweep_results, root / "sweep_results.csv")
