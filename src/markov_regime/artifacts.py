@@ -73,6 +73,7 @@ def write_run_artifact_bundle(
     consensus_members: pd.DataFrame | None = None,
     consensus_timeline: pd.DataFrame | None = None,
     consensus_summary: pd.DataFrame | None = None,
+    consensus_mode_comparison: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -113,9 +114,11 @@ def write_run_artifact_bundle(
         files["consensus_timeline_csv"] = _write_table(consensus_timeline, root / "consensus_timeline.csv")
     if consensus_summary is not None and not consensus_summary.empty:
         files["consensus_summary_csv"] = _write_table(consensus_summary, root / "consensus_summary.csv")
+    if consensus_mode_comparison is not None and not consensus_mode_comparison.empty:
+        files["consensus_mode_comparison_csv"] = _write_table(consensus_mode_comparison, root / "consensus_mode_comparison.csv")
 
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "created_at_utc": created_at.isoformat(),
         "symbol": symbol,

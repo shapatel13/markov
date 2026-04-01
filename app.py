@@ -14,7 +14,7 @@ if str(SRC_PATH) not in sys.path:
 
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.consensus import apply_consensus_confirmation, run_consensus_diagnostics
+from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
@@ -33,6 +33,7 @@ from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
     plot_baseline_comparison,
     plot_cost_stress,
+    plot_consensus_mode_comparison,
     plot_equity_curve,
     plot_forward_return_heatmap,
     plot_guardrail_summary,
@@ -264,6 +265,16 @@ if run_clicked:
                 if consensus_required
                 else None
             )
+            consensus_mode_comparison = (
+                compare_consensus_gate_modes(
+                    selected_result,
+                    consensus,
+                    interval=data_config.interval,
+                    strategy_config=execution_strategy_config,
+                )
+                if consensus is not None
+                else pd.DataFrame()
+            )
             if consensus is not None and strategy_config.require_consensus_confirmation:
                 selected_result = apply_consensus_confirmation(
                     selected_result,
@@ -294,6 +305,7 @@ if run_clicked:
                 consensus_members=consensus.members if consensus is not None else None,
                 consensus_timeline=consensus.timeline if consensus is not None else None,
                 consensus_summary=consensus.summary if consensus is not None else None,
+                consensus_mode_comparison=consensus_mode_comparison,
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
@@ -304,6 +316,7 @@ if run_clicked:
                 "timeframe_comparison": timeframe_comparison,
                 "feature_pack_comparison": feature_pack_comparison,
                 "consensus": consensus,
+                "consensus_mode_comparison": consensus_mode_comparison,
                 "confirmation_enabled": bool(data_config.interval == "4hour" and strategy_config.require_daily_confirmation),
                 "confirmation_summary": selected_result.confirmation_summary,
                 "confirmation_result": confirmation_result,
@@ -350,6 +363,7 @@ sweep_results = analysis["sweep_results"]
 robustness = analysis["robustness"]
 timeframe_comparison = analysis["timeframe_comparison"]
 feature_pack_comparison = analysis["feature_pack_comparison"]
+consensus_mode_comparison = analysis.get("consensus_mode_comparison", pd.DataFrame())
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 guardrail_text = latest_row["guardrail_reason"] or "accepted"
@@ -553,6 +567,11 @@ with consensus_tab:
                 st.dataframe(selected_result.consensus_summary, use_container_width=True, hide_index=True)
         with top_right:
             st.plotly_chart(plot_consensus_timeline(consensus.timeline), use_container_width=True)
+        st.subheader("Gate Mode Comparison")
+        st.plotly_chart(plot_consensus_mode_comparison(consensus_mode_comparison), use_container_width=True)
+        if not consensus_mode_comparison.empty:
+            st.dataframe(consensus_mode_comparison, use_container_width=True, hide_index=True)
+        st.caption("This panel replays the same run three ways: no consensus filter, a hard consensus gate, and an entry-only consensus gate. Use it to see whether consensus is improving trust or just crushing exposure.")
         st.subheader("Consensus Members")
         st.dataframe(consensus.members, use_container_width=True, hide_index=True)
 

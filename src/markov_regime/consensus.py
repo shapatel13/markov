@@ -473,6 +473,75 @@ def apply_consensus_confirmation(
     )
 
 
+def compare_consensus_gate_modes(
+    primary_result: WalkForwardResult,
+    diagnostics: ConsensusDiagnostics,
+    *,
+    interval: Interval,
+    strategy_config: StrategyConfig,
+) -> pd.DataFrame:
+    if diagnostics.timeline.empty:
+        return pd.DataFrame()
+
+    selected_mode = strategy_config.consensus_gate_mode if strategy_config.require_consensus_confirmation else "off"
+    aligned_primary = align_consensus_predictions(primary_result.predictions, diagnostics.timeline)
+
+    def _build_row(mode: str, label: str, result: WalkForwardResult) -> dict[str, object]:
+        latest = result.predictions.iloc[-1]
+        blocked_requested_share = 0.0
+        if result.consensus_summary is not None and not result.consensus_summary.empty:
+            blocked_requested_share = float(
+                result.consensus_summary.loc[
+                    result.consensus_summary["consensus_status"].isin(["weak_share", "flat_consensus", "opposed", "unavailable"]),
+                    "share_of_requested",
+                ].sum()
+            )
+        return {
+            "mode": mode,
+            "label": label,
+            "selected": mode == selected_mode,
+            "sharpe": float(result.metrics.get("sharpe", 0.0)),
+            "annualized_return": float(result.metrics.get("annualized_return", 0.0)),
+            "max_drawdown": float(result.metrics.get("max_drawdown", 0.0)),
+            "trades": float(result.metrics.get("trades", 0.0)),
+            "trade_win_rate": float(result.metrics.get("trade_win_rate", result.metrics.get("win_rate", 0.0))),
+            "expectancy": float(result.metrics.get("expectancy", 0.0)),
+            "exposure": float(result.metrics.get("exposure", 0.0)),
+            "confidence_coverage": float(result.metrics.get("confidence_coverage", 0.0)),
+            "latest_position": int(latest.get("signal_position", 0)),
+            "latest_candidate": int(latest.get("candidate_action", 0)),
+            "latest_guardrail": str(latest.get("guardrail_reason", "") or "accepted"),
+            "latest_consensus_status": str(latest.get("consensus_status", "not_applied")),
+            "latest_consensus_share": float(latest.get("consensus_effective_share", np.nan)),
+            "blocked_requested_share": blocked_requested_share,
+        }
+
+    mode_rows = [
+        _build_row(
+            "off",
+            "No Consensus",
+            replace(primary_result, predictions=aligned_primary),
+        )
+    ]
+    for mode, label in (("hard", "Hard Gate"), ("entry_only", "Entry-Only Gate")):
+        mode_config = replace(strategy_config, require_consensus_confirmation=True, consensus_gate_mode=mode)
+        mode_result = apply_consensus_confirmation(
+            primary_result,
+            diagnostics,
+            interval=interval,
+            strategy_config=mode_config,
+        )
+        mode_rows.append(_build_row(mode, label, mode_result))
+
+    comparison = pd.DataFrame(mode_rows)
+    order = {"off": 0, "hard": 1, "entry_only": 2}
+    return comparison.sort_values(
+        by="mode",
+        key=lambda values: values.map(lambda item: order.get(str(item), len(order))),
+        kind="stable",
+    ).reset_index(drop=True)
+
+
 def run_consensus_diagnostics(
     *,
     symbol: str,

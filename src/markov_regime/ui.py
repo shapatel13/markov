@@ -265,6 +265,52 @@ def plot_baseline_comparison(baseline_comparison: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def plot_consensus_mode_comparison(consensus_mode_comparison: pd.DataFrame) -> go.Figure:
+    if consensus_mode_comparison.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Consensus Mode Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No consensus mode comparison available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    color_map = {
+        True: "#0f766e",
+        False: "#94a3b8",
+    }
+    colors = [color_map[bool(value)] for value in consensus_mode_comparison["selected"]]
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=consensus_mode_comparison["label"],
+            y=consensus_mode_comparison["sharpe"],
+            name="Sharpe",
+            marker_color=colors,
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=consensus_mode_comparison["label"],
+            y=consensus_mode_comparison["annualized_return"],
+            mode="lines+markers",
+            name="Annualized Return",
+            yaxis="y2",
+            line=dict(color="#d97706"),
+        )
+    )
+    figure.update_layout(
+        title="Consensus Mode Comparison",
+        template="plotly_white",
+        yaxis=dict(title="Sharpe"),
+        yaxis2=dict(title="Annualized Return", overlaying="y", side="right"),
+        xaxis=dict(title="Consensus Mode"),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return figure
+
+
 def plot_consensus_timeline(consensus_timeline: pd.DataFrame) -> go.Figure:
     if consensus_timeline.empty:
         figure = go.Figure()
