@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.baselines import summarize_baselines
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.consensus import apply_consensus_overlay, build_consensus_timeline, summarize_consensus
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
@@ -418,6 +419,13 @@ def test_execution_cost_model_penalizes_wider_ranges_and_thinner_volume() -> Non
     assert float(costs.iloc[1]) > float(costs.iloc[0])
 
 
+def test_baseline_summary_includes_expected_references(synthetic_feature_frame: pd.DataFrame) -> None:
+    baseline_comparison = summarize_baselines(synthetic_feature_frame, "1hour", StrategyConfig())
+
+    assert {"buy_and_hold", "ema_trend", "vol_filtered_trend", "breakout"}.issubset(set(baseline_comparison["baseline"]))
+    assert {"sharpe", "annualized_return", "trades", "expectancy"}.issubset(baseline_comparison.columns)
+
+
 def test_block_bootstrap_returns_major_metric_intervals() -> None:
     intervals = block_bootstrap_confidence_intervals(
         returns=[0.01, -0.005, 0.002, 0.003, -0.001] * 20,
@@ -657,6 +665,34 @@ def test_consensus_overlay_blocks_when_share_is_too_low() -> None:
 
     assert filtered["signal_position"].eq(0).all()
     assert set(filtered["guardrail_reason"]) == {"consensus_weak_share"}
+    assert "weak_share" in set(summary["consensus_status"])
+
+
+def test_consensus_entry_only_mode_preserves_existing_hold() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1]
+    frame["candidate_action"] = [1, 1, 1]
+    frame["guardrail_reason"] = ["", "", ""]
+    frame["turnover"] = [0.0, 1.0, 0.0]
+    frame["gross_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["execution_cost_bps"] = [0.0, 0.0, 0.0]
+    frame["transaction_cost"] = [0.0, 0.0, 0.0]
+    frame["net_strategy_return"] = [0.0, 0.001, 0.001]
+    frame["asset_wealth"] = [1.0, 1.001, 1.002001]
+    frame["strategy_wealth"] = [1.0, 1.001, 1.002001]
+    frame["consensus_timestamp"] = pd.date_range("2024-12-31", periods=3, freq="4h")
+    frame["consensus_position"] = [1, 1, 1]
+    frame["consensus_position_share"] = [0.8, 0.8, 0.55]
+    frame["consensus_candidate"] = [1, 1, 1]
+    frame["consensus_candidate_share"] = [0.8, 0.8, 0.55]
+
+    filtered, summary = apply_consensus_overlay(
+        frame,
+        StrategyConfig(require_consensus_confirmation=True, consensus_min_share=0.67, consensus_gate_mode="entry_only"),
+    )
+
+    assert filtered["signal_position"].tolist() == [0, 1, 1]
+    assert filtered.loc[2, "guardrail_reason"] == "consensus_hold_weak_share"
     assert "weak_share" in set(summary["consensus_status"])
 
 

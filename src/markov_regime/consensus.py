@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.baselines import summarize_baselines
 from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, default_walk_forward_config
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import DataFetchResult, fetch_price_data
@@ -308,6 +309,15 @@ def _consensus_reason(status: str) -> str:
     }.get(status, "")
 
 
+def _consensus_hold_reason(status: str) -> str:
+    return {
+        "weak_share": "consensus_hold_weak_share",
+        "flat_consensus": "consensus_hold_flat",
+        "opposed": "consensus_hold_opposed",
+        "unavailable": "consensus_hold_unavailable",
+    }.get(status, "")
+
+
 def apply_consensus_overlay(signal_frame: pd.DataFrame, config: StrategyConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     required_columns = {"consensus_position", "consensus_position_share", "consensus_candidate", "consensus_candidate_share"}
     if not config.require_consensus_confirmation or not required_columns.issubset(signal_frame.columns):
@@ -317,6 +327,7 @@ def apply_consensus_overlay(signal_frame: pd.DataFrame, config: StrategyConfig) 
     overlay["consensus_base_signal_position"] = overlay["signal_position"].astype(int)
     overlay["consensus_base_candidate_action"] = overlay["candidate_action"].astype(int)
     overlay["consensus_base_guardrail_reason"] = overlay["guardrail_reason"].fillna("")
+    overlay["consensus_base_turnover"] = overlay["turnover"].fillna(0.0).astype(float) if "turnover" in overlay.columns else 0.0
     overlay["consensus_position"] = overlay["consensus_position"].fillna(0.0).astype(int)
     overlay["consensus_candidate"] = overlay["consensus_candidate"].fillna(0.0).astype(int)
     overlay["consensus_position_share"] = overlay["consensus_position_share"].fillna(0.0).astype(float)
@@ -362,12 +373,30 @@ def apply_consensus_overlay(signal_frame: pd.DataFrame, config: StrategyConfig) 
     overlay["consensus_reason"] = overlay["consensus_status"].map(_consensus_reason)
 
     allow_mask = overlay["consensus_status"] == "confirmed"
-    overlay["signal_position"] = np.where(allow_mask, overlay["consensus_base_signal_position"], 0).astype(int)
+    entry_attempt = (overlay["consensus_base_turnover"] > 0.0) & (overlay["consensus_base_signal_position"] != 0)
+    carry_existing_hold = (
+        (config.consensus_gate_mode == "entry_only")
+        & ~allow_mask
+        & (overlay["consensus_status"].isin(["weak_share", "flat_consensus", "opposed", "unavailable"]))
+        & (overlay["consensus_base_signal_position"] != 0)
+        & ~entry_attempt
+    )
+
+    overlay["signal_position"] = np.where(
+        allow_mask | carry_existing_hold,
+        overlay["consensus_base_signal_position"],
+        0,
+    ).astype(int)
     overlay["candidate_action"] = np.where(allow_mask, overlay["consensus_base_candidate_action"], 0).astype(int)
+    hold_reasons = overlay["consensus_status"].map(_consensus_hold_reason)
     overlay["guardrail_reason"] = np.where(
-        overlay["consensus_status"].isin(["weak_share", "flat_consensus", "opposed", "unavailable"]),
-        overlay["consensus_reason"],
-        overlay["consensus_base_guardrail_reason"],
+        carry_existing_hold,
+        hold_reasons,
+        np.where(
+            overlay["consensus_status"].isin(["weak_share", "flat_consensus", "opposed", "unavailable"]),
+            overlay["consensus_reason"],
+            overlay["consensus_base_guardrail_reason"],
+        ),
     )
     overlay["guardrail_reason"] = pd.Series(overlay["guardrail_reason"], index=overlay.index).fillna("").astype(str)
     overlay["bars_held"] = _recompute_bars_held(overlay["signal_position"])
@@ -413,6 +442,7 @@ def apply_consensus_confirmation(
     )
     updated_trade_log = build_trade_table(confirmed_predictions)
     updated_trade_summary = summarize_trade_table(updated_trade_log)
+    updated_baseline_comparison = summarize_baselines(confirmed_predictions, interval, strategy_config)
     updated_fold_diagnostics = primary_result.fold_diagnostics.copy()
     for fold_id, fold_frame in confirmed_predictions.groupby("fold_id", sort=True):
         metrics = compute_metrics(fold_frame, interval)
@@ -439,6 +469,7 @@ def apply_consensus_confirmation(
         trade_summary=updated_trade_summary,
         guardrail_summary=guardrail_summary.sort_values("bars", ascending=False).reset_index(drop=True),
         consensus_summary=consensus_summary,
+        baseline_comparison=updated_baseline_comparison,
     )
 
 

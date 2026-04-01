@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 Interval = Literal["1hour", "4hour", "1day"]
+ConsensusGateMode = Literal["hard", "entry_only"]
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class StrategyConfig:
     require_daily_confirmation: bool = False
     require_consensus_confirmation: bool = False
     consensus_min_share: float = 0.67
+    consensus_gate_mode: ConsensusGateMode = "hard"
     min_validation_edge: float = 0.0
     min_validation_samples: int = 20
     signal_horizon: int = 6

@@ -232,6 +232,39 @@ def plot_feature_pack_comparison(feature_comparison: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def plot_baseline_comparison(baseline_comparison: pd.DataFrame) -> go.Figure:
+    if baseline_comparison.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Baseline Comparison",
+            template="plotly_white",
+            annotations=[dict(text="No baseline comparison available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    figure = go.Figure()
+    figure.add_trace(go.Bar(x=baseline_comparison["baseline"], y=baseline_comparison["sharpe"], name="Sharpe"))
+    figure.add_trace(
+        go.Scatter(
+            x=baseline_comparison["baseline"],
+            y=baseline_comparison["annualized_return"],
+            mode="lines+markers",
+            name="Annualized Return",
+            yaxis="y2",
+        )
+    )
+    figure.update_layout(
+        title="Baseline Comparison",
+        template="plotly_white",
+        yaxis=dict(title="Sharpe"),
+        yaxis2=dict(title="Annualized Return", overlaying="y", side="right"),
+        xaxis=dict(title="Baseline"),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return figure
+
+
 def plot_consensus_timeline(consensus_timeline: pd.DataFrame) -> go.Figure:
     if consensus_timeline.empty:
         figure = go.Figure()

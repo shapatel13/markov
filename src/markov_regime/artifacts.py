@@ -91,6 +91,8 @@ def write_run_artifact_bundle(
     files["bootstrap_csv"] = _write_table(selected_result.bootstrap, root / "bootstrap.csv")
     files["forward_returns_csv"] = _write_table(selected_result.forward_returns, root / "forward_returns.csv")
     files["guardrails_csv"] = _write_table(selected_result.guardrail_summary, root / "guardrails.csv")
+    if selected_result.baseline_comparison is not None and not selected_result.baseline_comparison.empty:
+        files["baseline_comparison_csv"] = _write_table(selected_result.baseline_comparison, root / "baseline_comparison.csv")
     if selected_result.trade_log is not None and not selected_result.trade_log.empty:
         files["trade_log_csv"] = _write_table(selected_result.trade_log, root / "trade_log.csv")
     if selected_result.trade_summary is not None and not selected_result.trade_summary.empty:
@@ -113,7 +115,7 @@ def write_run_artifact_bundle(
         files["consensus_summary_csv"] = _write_table(consensus_summary, root / "consensus_summary.csv")
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": run_id,
         "created_at_utc": created_at.isoformat(),
         "symbol": symbol,

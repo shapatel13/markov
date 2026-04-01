@@ -31,6 +31,7 @@ from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
 from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
+    plot_baseline_comparison,
     plot_cost_stress,
     plot_equity_curve,
     plot_forward_return_heatmap,
@@ -115,6 +116,7 @@ with st.sidebar.form("controls"):
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
+    consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
     cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=2.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
@@ -150,6 +152,7 @@ if run_clicked:
                 require_daily_confirmation=require_daily_confirmation,
                 require_consensus_confirmation=require_consensus_confirmation,
                 consensus_min_share=consensus_min_share,
+                consensus_gate_mode=consensus_gate_mode,
                 cost_bps=cost_bps,
                 spread_bps=spread_bps,
                 slippage_bps=slippage_bps,
@@ -459,8 +462,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, trades_tab, interpretation_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Trades", "Interpretation", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, trades_tab, baselines_tab, interpretation_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Trades", "Baselines", "Interpretation", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -491,6 +494,11 @@ with trades_tab:
             st.info("No trades were opened on this run.")
         else:
             st.dataframe(selected_result.trade_log, use_container_width=True, hide_index=True)
+
+with baselines_tab:
+    st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
+    st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
+    st.caption("These are simpler reference systems on the same out-of-sample slices. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)

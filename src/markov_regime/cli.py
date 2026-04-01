@@ -61,6 +61,7 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--confidence-gap", type=float, default=0.05)
     parser.add_argument("--require-daily-confirmation", action="store_true", help="Only execute 4H exposure when the daily lane agrees.")
     parser.add_argument("--require-consensus-confirmation", action="store_true", help="Only execute exposure when nearby seeds and state counts agree.")
+    parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="hard", help="How weak consensus should be handled when the consensus filter is enabled.")
     parser.add_argument("--consensus-min-share", type=float, default=0.67, help="Minimum consensus agreement share required before a trade is allowed.")
     parser.add_argument("--cost-bps", type=float, default=2.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
@@ -83,6 +84,7 @@ def _load_result(args: argparse.Namespace):
         require_daily_confirmation=args.require_daily_confirmation,
         require_consensus_confirmation=args.require_consensus_confirmation,
         consensus_min_share=args.consensus_min_share,
+        consensus_gate_mode=args.consensus_gate_mode,
         cost_bps=args.cost_bps,
         spread_bps=args.spread_bps,
         slippage_bps=args.slippage_bps,

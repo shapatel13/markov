@@ -27,6 +27,7 @@ CONTROL_HELP: dict[str, str] = {
     "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
     "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
     "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
+    "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue.",
     "cost_bps": "Trading fee assumption in basis points. This is direct fee friction before spread and slippage.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
@@ -123,6 +124,22 @@ def describe_guardrail(reason: str, *, current_position: int, candidate_action: 
         return "The strategy is respecting the minimum hold rule, so it is not allowed to exit or reverse immediately."
     if reason_key == "cooldown_active":
         return "The strategy is in cooldown after a recent exit, so it is intentionally waiting before re-entering."
+    if reason_key == "consensus_weak_share":
+        return "Nearby seeds and state counts do not agree strongly enough, so the strategy prefers no trade."
+    if reason_key == "consensus_flat":
+        return "The nearby-model consensus panel prefers no trade, so the strategy stands down."
+    if reason_key == "consensus_opposes":
+        return "The nearby-model consensus panel leans the other way, so the trade is blocked."
+    if reason_key == "consensus_unavailable":
+        return "Consensus diagnostics were not available, so the trade is blocked."
+    if reason_key == "consensus_hold_weak_share":
+        return "Consensus is too weak for a fresh entry, but the strategy is allowing an existing position to continue."
+    if reason_key == "consensus_hold_flat":
+        return "The consensus panel prefers no new trade, but the strategy is preserving an existing hold instead of force-flattening."
+    if reason_key == "consensus_hold_opposed":
+        return "Consensus now leans the other way, but this softer mode is preserving the existing hold instead of force-flattening."
+    if reason_key == "consensus_hold_unavailable":
+        return "Consensus diagnostics are unavailable, so new entries are blocked while existing exposure is allowed to continue."
     return f"Latest guardrail status: {reason_key.replace('_', ' ')}."
 
 
@@ -665,6 +682,15 @@ def build_control_interpretation_rows(
                 "Consensus confirmation is enforcing agreement across nearby seeds and state counts before the trade is allowed."
                 if strategy_config.require_consensus_confirmation
                 else "Consensus confirmation is off, so the selected model can trade without nearby-model agreement."
+            ),
+        },
+        {
+            "control": "Consensus Gate Mode",
+            "value": strategy_config.consensus_gate_mode,
+            "interpretation": (
+                "Hard mode fully blocks weak-consensus trades."
+                if strategy_config.consensus_gate_mode == "hard"
+                else "Entry-only mode blocks weak new entries but can keep an existing position alive through mild disagreement."
             ),
         },
         {

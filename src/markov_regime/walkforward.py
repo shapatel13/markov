@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.baselines import summarize_baselines
 from markov_regime.config import Interval, ModelConfig, StrategyConfig, WalkForwardConfig
 from markov_regime.model import (
     align_state_mapping,
@@ -57,6 +58,7 @@ class WalkForwardResult:
     trade_log: pd.DataFrame = field(default_factory=pd.DataFrame)
     trade_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     consensus_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    baseline_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def suggest_walk_forward_config(
@@ -320,6 +322,7 @@ def run_walk_forward(
     converged_ratio = float(diagnostics["converged"].mean()) if not diagnostics.empty else 0.0
     trade_log = build_trade_table(predictions)
     trade_summary = summarize_trade_table(trade_log)
+    baseline_comparison = summarize_baselines(predictions, interval, strategy_config)
 
     return WalkForwardResult(
         n_states=model_config.n_states,
@@ -335,6 +338,7 @@ def run_walk_forward(
         converged_ratio=converged_ratio,
         trade_log=trade_log,
         trade_summary=trade_summary,
+        baseline_comparison=baseline_comparison,
     )
 
 

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
+from markov_regime.baselines import summarize_baselines
 from markov_regime.config import Interval, StrategyConfig
 from markov_regime.strategy import (
     build_buy_and_hold_frame,
@@ -221,6 +222,7 @@ def apply_higher_timeframe_confirmation(
     updated_guardrail_summary = _guardrail_summary(confirmed_predictions)
     updated_trade_log = build_trade_table(confirmed_predictions)
     updated_trade_summary = summarize_trade_table(updated_trade_log)
+    updated_baseline_comparison = summarize_baselines(confirmed_predictions, interval, strategy_config)
 
     return replace(
         primary_result,
@@ -234,4 +236,5 @@ def apply_higher_timeframe_confirmation(
         confirmation_summary=confirmation_summary,
         trade_log=updated_trade_log,
         trade_summary=updated_trade_summary,
+        baseline_comparison=updated_baseline_comparison,
     )
