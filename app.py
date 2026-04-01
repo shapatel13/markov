@@ -27,7 +27,12 @@ from markov_regime.interpretation import (
     first_sentence,
     summarize_promotion_gates,
 )
-from markov_regime.research import run_feature_pack_comparison, run_timeframe_comparison
+from markov_regime.research import (
+    nested_holdout_evaluation,
+    nested_holdout_summary_frame,
+    run_feature_pack_comparison,
+    run_timeframe_comparison,
+)
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
@@ -93,7 +98,7 @@ st.caption("FMP-backed BTC 4H preset with blind out-of-sample walk-forward diagn
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC 4H research with daily confirmation and optional 1H baseline checks.")
+    st.caption("Default preset: BTC 4H `trend` research with daily confirmation. If consensus is enabled, the recommended gate mode is `entry_only`.")
     feature_pack_options = list(list_feature_packs())
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
@@ -119,7 +124,12 @@ with st.sidebar.form("controls"):
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
-    consensus_gate_mode = st.selectbox("Consensus gate mode", options=["hard", "entry_only"], index=0, help=CONTROL_HELP["consensus_gate_mode"])
+    consensus_gate_mode = st.selectbox(
+        "Consensus gate mode",
+        options=["hard", "entry_only"],
+        index=["hard", "entry_only"].index(StrategyConfig().consensus_gate_mode),
+        help=CONTROL_HELP["consensus_gate_mode"],
+    )
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
     cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=10.0, step=0.5, help=CONTROL_HELP["cost_bps"])
     spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
@@ -284,6 +294,14 @@ if run_clicked:
                     interval=data_config.interval,
                     strategy_config=execution_strategy_config,
                 )
+            nested_holdout = nested_holdout_evaluation(
+                predictions=selected_result.predictions,
+                n_states=selected_states,
+                base_config=execution_strategy_config,
+                interval=data_config.interval,
+                outer_holdout_folds=1,
+            )
+            nested_holdout_table = nested_holdout_summary_frame(nested_holdout)
             notes = build_research_notes(selected_result, comparison)
             artifact = write_run_artifact_bundle(
                 symbol=symbol,
@@ -308,6 +326,7 @@ if run_clicked:
                 consensus_timeline=consensus.timeline if consensus is not None else None,
                 consensus_summary=consensus.summary if consensus is not None else None,
                 consensus_mode_comparison=consensus_mode_comparison,
+                nested_holdout_summary=pd.DataFrame([nested_holdout]),
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
@@ -319,6 +338,8 @@ if run_clicked:
                 "feature_pack_comparison": feature_pack_comparison,
                 "consensus": consensus,
                 "consensus_mode_comparison": consensus_mode_comparison,
+                "nested_holdout": nested_holdout,
+                "nested_holdout_table": nested_holdout_table,
                 "confirmation_enabled": bool(data_config.interval == "4hour" and strategy_config.require_daily_confirmation),
                 "confirmation_summary": selected_result.confirmation_summary,
                 "confirmation_result": confirmation_result,
@@ -366,6 +387,8 @@ robustness = analysis["robustness"]
 timeframe_comparison = analysis["timeframe_comparison"]
 feature_pack_comparison = analysis["feature_pack_comparison"]
 consensus_mode_comparison = analysis.get("consensus_mode_comparison", pd.DataFrame())
+nested_holdout = analysis.get("nested_holdout", {})
+nested_holdout_table = analysis.get("nested_holdout_table", pd.DataFrame())
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 guardrail_text = latest_row["guardrail_reason"] or "accepted"
@@ -394,6 +417,8 @@ promotion_gates = build_promotion_gate_rows(
     interval=analysis["interval"],
     available_rows=analysis["available_rows"],
     walk_adjusted=analysis["walk_adjusted"],
+    fold_count=int(len(selected_result.fold_diagnostics)),
+    nested_holdout=nested_holdout,
 )
 promotion_snapshot = summarize_promotion_gates(promotion_gates)
 trust_snapshot = build_trust_snapshot(
@@ -595,6 +620,11 @@ with methodology_tab:
                 ),
                 "interpretation": "Fees, spread, slippage, and liquidity impact are all charged before reporting strategy returns.",
             },
+            {
+                "component": "Nested Holdout Check",
+                "value": str(nested_holdout.get("status", "not_run")).replace("_", " ").title(),
+                "interpretation": "The inner folds choose settings from the diagnostic sweep, then the most recent untouched outer folds score those settings afterward.",
+            },
         ]
     )
     st.dataframe(methodology_rows, use_container_width=True, hide_index=True)
@@ -626,6 +656,24 @@ with methodology_tab:
     st.subheader("Promotion Gates")
     st.dataframe(promotion_gates, use_container_width=True, hide_index=True)
     st.caption("These gates are intentionally stricter than a simple positive Sharpe. A run should clear them before it influences defaults or gets treated as a credible candidate.")
+    st.subheader("Nested Holdout Check")
+    if nested_holdout.get("status") == "ok":
+        st.info(
+            "Inner folds selected the sweep settings, and the outer holdout folds then judged them blind. "
+            f"Outer holdout Sharpe: {float(nested_holdout.get('outer_holdout_sharpe', 0.0)):.2f}, "
+            f"annualized return: {float(nested_holdout.get('outer_holdout_annualized_return', 0.0)):.1%}, "
+            f"trades: {int(float(nested_holdout.get('outer_holdout_trades', 0.0)))}."
+        )
+    else:
+        st.warning(
+            "Nested holdout confirmation was not fully available for this run. "
+            "That usually means there were too few folds to reserve a clean outer slice after inner selection."
+        )
+    st.dataframe(nested_holdout_table, use_container_width=True, hide_index=True)
+    st.caption(
+        "This is the closest thing in the app to a holdout-aware sweep check. "
+        "Use it to separate 'the sweep found a nice row' from 'that row still worked on untouched later folds.'"
+    )
 
 with confirmation_tab:
     if analysis["confirmation_enabled"]:
@@ -684,6 +732,15 @@ with sensitivity_tab:
     st.warning(
         "Parameter sweeps here are diagnostic only. They replay alternative thresholds on the already-observed out-of-sample path, so they help us understand sensitivity but do not qualify as blind model selection."
     )
+    if nested_holdout.get("status") == "ok":
+        st.info(
+            "Nested holdout cross-check: "
+            f"inner folds chose posterior {float(nested_holdout.get('selected_inner_posterior_threshold', 0.0)):.2f}, "
+            f"min hold {int(float(nested_holdout.get('selected_inner_min_hold_bars', 0.0)))}, "
+            f"cooldown {int(float(nested_holdout.get('selected_inner_cooldown_bars', 0.0)))}, "
+            f"confirmations {int(float(nested_holdout.get('selected_inner_required_confirmations', 0.0)))}; "
+            f"outer holdout Sharpe then came in at {float(nested_holdout.get('outer_holdout_sharpe', 0.0)):.2f}."
+        )
     if not sweep_results.empty:
         top_row = sweep_results.iloc[0]
         st.info(

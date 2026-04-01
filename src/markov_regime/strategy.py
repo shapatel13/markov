@@ -584,6 +584,10 @@ def replay_strategy(
         from markov_regime.confirmation import apply_confirmation_overlay
 
         combined, _ = apply_confirmation_overlay(combined, config)
+    if config.require_consensus_confirmation and "consensus_position" in combined.columns:
+        from markov_regime.consensus import apply_consensus_overlay
+
+        combined, _ = apply_consensus_overlay(combined, config)
     return combined, compute_metrics(combined, interval)
 
 

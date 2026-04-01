@@ -27,7 +27,7 @@ CONTROL_HELP: dict[str, str] = {
     "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
     "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
     "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
-    "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue.",
+    "consensus_gate_mode": "Controls whether weak consensus fully blocks exposure or only blocks fresh entries while allowing existing holds to continue. `entry_only` is the recommended default because it kept more of the useful signal in testing than `hard` mode.",
     "cost_bps": "Trading fee assumption in basis points. Default is now 10 bps (0.10%) before spread and slippage to avoid unrealistically cheap crypto backtests.",
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
@@ -556,6 +556,8 @@ def build_promotion_gate_rows(
     interval: Interval,
     available_rows: int,
     walk_adjusted: bool,
+    fold_count: int,
+    nested_holdout: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
     sharpe = float(metrics.get("sharpe", 0.0))
     trades = float(metrics.get("trades", 0.0))
@@ -564,12 +566,41 @@ def build_promotion_gate_rows(
     robustness_median = _median_robustness_sharpe(robustness)
     best_baseline_sharpe = _best_baseline_sharpe(baseline_comparison)
     sample_band = _sample_band(interval, available_rows)
+    nested_status = str((nested_holdout or {}).get("status", "unavailable"))
+    outer_holdout_sharpe = (
+        float((nested_holdout or {}).get("outer_holdout_sharpe", 0.0))
+        if nested_status == "ok"
+        else None
+    )
 
     rows = [
         {
             "gate": "Positive OOS Sharpe",
             "status": "pass" if sharpe > 0.0 else "fail",
             "detail": f"Current out-of-sample Sharpe is {sharpe:.2f}.",
+        },
+        {
+            "gate": "Enough Walk-Forward Folds",
+            "status": "pass" if fold_count >= 3 else "fail",
+            "detail": f"Observed {fold_count} walk-forward folds. Fewer than 3 folds is usually too thin for holdout-aware promotion.",
+        },
+        {
+            "gate": "Nested Holdout Available",
+            "status": "pass" if nested_status == "ok" else "fail",
+            "detail": (
+                "Inner folds selected settings and a reserved outer fold remained available for blind confirmation."
+                if nested_status == "ok"
+                else "There were not enough folds to reserve a clean outer holdout after inner selection."
+            ),
+        },
+        {
+            "gate": "Nested Holdout Sharpe Positive",
+            "status": "pass" if outer_holdout_sharpe is not None and outer_holdout_sharpe > 0.0 else "fail",
+            "detail": (
+                f"Outer holdout Sharpe is {outer_holdout_sharpe:.2f}."
+                if outer_holdout_sharpe is not None
+                else "Nested outer holdout Sharpe is unavailable because no clean outer holdout remained."
+            ),
         },
         {
             "gate": "Bootstrap Lower Bound Above Zero",
