@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
@@ -63,13 +64,57 @@ def test_feature_frame_contains_forward_horizons(synthetic_feature_frame: pd.Dat
 
 
 def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFrame) -> None:
-    assert {"baseline", "trend", "volatility", "regime_mix"}.issubset(set(list_feature_packs()))
+    assert {
+        "baseline",
+        "trend",
+        "volatility",
+        "regime_mix",
+        "trend_strength",
+        "mean_reversion",
+        "vol_surface",
+        "regime_mix_v2",
+    }.issubset(set(list_feature_packs()))
 
     trend_columns = get_feature_columns("trend")
     trend_frame = build_feature_frame(synthetic_prices, feature_columns=trend_columns)
+    trend_strength_columns = get_feature_columns("trend_strength")
+    trend_strength_frame = build_feature_frame(synthetic_prices, feature_columns=trend_strength_columns)
+    mean_reversion_columns = get_feature_columns("mean_reversion")
+    mean_reversion_frame = build_feature_frame(synthetic_prices, feature_columns=mean_reversion_columns)
+    vol_surface_columns = get_feature_columns("vol_surface")
+    vol_surface_frame = build_feature_frame(synthetic_prices, feature_columns=vol_surface_columns)
 
     assert "ema_gap_24" in trend_columns
+    assert "adx_14" in trend_strength_columns
+    assert "rsi_14" in mean_reversion_columns
+    assert "parkinson_vol_24" in vol_surface_columns
     assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
+    assert trend_strength_frame.loc[:, list(trend_strength_columns)].isna().sum().sum() == 0
+    assert mean_reversion_frame.loc[:, list(mean_reversion_columns)].isna().sum().sum() == 0
+    assert vol_surface_frame.loc[:, list(vol_surface_columns)].isna().sum().sum() == 0
+
+
+def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.DataFrame) -> None:
+    advanced_columns = (
+        "adx_14",
+        "plus_di_14",
+        "minus_di_14",
+        "rsi_14",
+        "stoch_k_14",
+        "bollinger_z_20",
+        "bollinger_bandwidth_20",
+        "donchian_position_20",
+        "breakout_distance_20",
+        "distance_to_vwap_24",
+        "realized_skew_24",
+        "realized_kurt_24",
+        "parkinson_vol_24",
+        "garman_klass_vol_24",
+    )
+    frame = build_feature_frame(synthetic_prices, feature_columns=advanced_columns)
+
+    assert set(advanced_columns).issubset(frame.columns)
+    assert np.isfinite(frame.loc[:, list(advanced_columns)].to_numpy()).all()
 
 
 def test_normalize_symbol_maps_common_crypto_aliases() -> None:
