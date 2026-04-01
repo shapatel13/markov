@@ -419,8 +419,8 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
 
-overview_tab, interpretation_tab, confirmation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Interpretation", "Confirmation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, trades_tab, interpretation_tab, confirmation_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Trades", "Interpretation", "Confirmation", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -438,6 +438,19 @@ with overview_tab:
         st.dataframe(metric_frame, use_container_width=True)
         st.plotly_chart(plot_guardrail_summary(selected_result.guardrail_summary), use_container_width=True)
         st.plotly_chart(plot_cost_stress(selected_result.cost_stress), use_container_width=True)
+
+with trades_tab:
+    summary_col, log_col = st.columns([0.9, 1.5])
+    with summary_col:
+        st.subheader("Trade Summary")
+        st.dataframe(selected_result.trade_summary, use_container_width=True, hide_index=True)
+        st.caption("Trade-level metrics focus on realized trade outcomes, while `bar_win_rate` in the overview table tracks winning bars while exposure is active.")
+    with log_col:
+        st.subheader("Trade Log")
+        if selected_result.trade_log.empty:
+            st.info("No trades were opened on this run.")
+        else:
+            st.dataframe(selected_result.trade_log, use_container_width=True, hide_index=True)
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)

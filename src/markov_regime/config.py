@@ -45,6 +45,9 @@ class StrategyConfig:
     min_validation_edge: float = 0.0
     min_validation_samples: int = 20
     signal_horizon: int = 6
+    scoring_horizons: tuple[int, ...] = (6, 12, 24)
+    validation_shrinkage: float = 30.0
+    min_consistent_horizons: int = 2
     allow_short: bool = False
     cost_bps: float = 2.0
     spread_bps: float = 4.0

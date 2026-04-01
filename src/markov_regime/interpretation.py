@@ -29,6 +29,9 @@ CONTROL_HELP: dict[str, str] = {
     "spread_bps": "Bid/ask spread assumption in basis points. Wider spreads punish turnover-heavy variants.",
     "slippage_bps": "Execution slippage assumption in basis points. Higher values test whether the edge survives imperfect fills.",
     "impact_bps": "Liquidity impact penalty in basis points. Higher values stress strategies that need more urgent execution.",
+    "scoring_horizons": "Forward-return horizons used to score each latent state. Multiple horizons reduce the odds that one lucky window defines the trade label.",
+    "validation_shrinkage": "Amount of shrinkage applied to state validation edges. Higher values pull weak, small-sample edges back toward zero.",
+    "min_consistent_horizons": "How many forward horizons must agree before a state becomes tradable. Higher values prefer consistency over coverage.",
 }
 
 
@@ -230,6 +233,10 @@ def build_metric_interpretation_rows(
     sharpe = float(metrics.get("sharpe", 0.0))
     annualized_return = float(metrics.get("annualized_return", 0.0))
     coverage = float(metrics.get("confidence_coverage", 0.0))
+    bar_win_rate = float(metrics.get("bar_win_rate", 0.0))
+    trade_win_rate = float(metrics.get("trade_win_rate", metrics.get("win_rate", 0.0)))
+    expectancy = float(metrics.get("expectancy", 0.0))
+    profit_factor = float(metrics.get("profit_factor", 0.0))
     trades = float(metrics.get("trades", 0.0))
     snapshot = build_trust_snapshot(
         metrics=metrics,
@@ -318,6 +325,40 @@ def build_metric_interpretation_rows(
     else:
         trades_text = "Healthy trade count, though execution assumptions still matter."
 
+    if bar_win_rate >= 0.6:
+        bar_win_rate_text = "A good share of active bars made money, but this can still overstate strategy quality if losses cluster into a few bad trades."
+    elif bar_win_rate >= 0.5:
+        bar_win_rate_text = "Slightly positive at the bar level. Useful, but less important than trade expectancy."
+    else:
+        bar_win_rate_text = "Weak at the bar level. Even before grouping into trades, the edge is not very clean."
+
+    if trade_win_rate >= 0.6:
+        trade_win_rate_text = "Strong trade hit rate on this sample, though it still needs enough trade count and a healthy payoff profile."
+    elif trade_win_rate >= 0.45:
+        trade_win_rate_text = "Middle-of-the-road trade hit rate. Profitability will depend on winners being larger than losers."
+    else:
+        trade_win_rate_text = "Low trade hit rate. The strategy needs unusually strong winner size to overcome this."
+
+    if expectancy > 0.01:
+        expectancy_text = "Positive average trade expectancy. Each closed trade has added meaningful value on average."
+    elif expectancy > 0.0:
+        expectancy_text = "Slightly positive trade expectancy. Encouraging, but still fragile."
+    elif expectancy > -0.01:
+        expectancy_text = "Near-flat expectancy. The strategy is not clearly earning enough per trade yet."
+    else:
+        expectancy_text = "Negative expectancy. The average closed trade is losing money."
+
+    if profit_factor >= 2.0:
+        profit_factor_text = "Strong payoff balance. Gross winners are comfortably outweighing gross losers."
+    elif profit_factor >= 1.2:
+        profit_factor_text = "Healthy enough payoff balance for a research candidate."
+    elif profit_factor >= 1.0:
+        profit_factor_text = "Barely above break-even. Small cost changes could erase the edge."
+    elif profit_factor > 0.0:
+        profit_factor_text = "Gross losers outweigh or nearly match gross winners."
+    else:
+        profit_factor_text = "No demonstrated payoff edge yet at the trade level."
+
     if robustness_median is None:
         robustness_text = "No usable robustness basket result was available."
         robustness_value = "n/a"
@@ -405,9 +446,29 @@ def build_metric_interpretation_rows(
             "interpretation": coverage_text,
         },
         {
+            "metric": "Bar Win Rate",
+            "value": f"{bar_win_rate:.1%}",
+            "interpretation": bar_win_rate_text,
+        },
+        {
+            "metric": "Trade Win Rate",
+            "value": f"{trade_win_rate:.1%}",
+            "interpretation": trade_win_rate_text,
+        },
+        {
             "metric": "Trades",
             "value": f"{trades:.0f}",
             "interpretation": trades_text,
+        },
+        {
+            "metric": "Expectancy",
+            "value": f"{expectancy:.2%}",
+            "interpretation": expectancy_text,
+        },
+        {
+            "metric": "Profit Factor",
+            "value": f"{profit_factor:.2f}",
+            "interpretation": profit_factor_text,
         },
         {
             "metric": "Cross-Asset Robustness",
@@ -542,6 +603,21 @@ def build_control_interpretation_rows(
             "control": "Required Confirmations",
             "value": f"{strategy_config.required_confirmations}",
             "interpretation": confirmation_text,
+        },
+        {
+            "control": "Scoring Horizons",
+            "value": ", ".join(str(horizon) for horizon in strategy_config.scoring_horizons),
+            "interpretation": "These forward horizons vote on whether a state is truly tradable. Multiple horizons reduce one-window luck.",
+        },
+        {
+            "control": "Validation Shrinkage",
+            "value": f"{strategy_config.validation_shrinkage:.0f}",
+            "interpretation": "Higher shrinkage pulls thin-sample validation edges back toward zero, which makes the state labels more conservative.",
+        },
+        {
+            "control": "Consistent Horizons Required",
+            "value": f"{strategy_config.min_consistent_horizons}",
+            "interpretation": "This is the number of scored horizons that must agree before a state can be labeled as directional.",
         },
         {
             "control": "Daily Confirmation Filter",

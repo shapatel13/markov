@@ -32,6 +32,8 @@ from markov_regime.robustness import parse_symbol_list
 from markov_regime.strategy import (
     apply_trading_rules,
     attach_state_action_columns,
+    build_trade_table,
+    compute_metrics,
     derive_state_actions,
     estimate_execution_cost_bps,
     parameter_sweep,
@@ -195,6 +197,36 @@ def test_guardrail_keeps_strategy_flat_when_posterior_is_low() -> None:
     assert set(result["guardrail_reason"]) == {"posterior_below_threshold"}
 
 
+def test_multi_horizon_state_scoring_requires_consistency() -> None:
+    validate_frame = pd.DataFrame(
+        {
+            "canonical_state": [0] * 30 + [1] * 30,
+            "max_posterior": [0.9] * 60,
+            "forward_return_6": [0.02] * 30 + [0.02] * 30,
+            "forward_return_12": [-0.02] * 30 + [0.015] * 30,
+            "forward_return_24": [0.0] * 30 + [0.01] * 30,
+        }
+    )
+
+    state_actions = derive_state_actions(
+        validate_frame,
+        n_states=2,
+        config=StrategyConfig(
+            min_validation_samples=10,
+            scoring_horizons=(6, 12, 24),
+            validation_shrinkage=0.0,
+            min_consistent_horizons=2,
+            required_confirmations=1,
+        ),
+    ).set_index("canonical_state")
+
+    assert int(state_actions.loc[0, "action"]) == 0
+    assert state_actions.loc[0, "label"] == "inconsistent_across_horizons"
+    assert int(state_actions.loc[1, "action"]) == 1
+    assert state_actions.loc[1, "label"] == "risk_on"
+    assert int(state_actions.loc[1, "consistent_horizons"]) >= 2
+
+
 def test_daily_confirmation_overlay_blocks_opposing_exposure() -> None:
     frame = _signal_input_frame([0.8, 0.8, 0.8])
     frame["signal_position"] = [0, 1, 1]
@@ -288,6 +320,50 @@ def test_confirmations_and_min_hold_delay_entry_and_exit() -> None:
 
     assert result["signal_position"].tolist() == [0, 1, 1, 1, 1, 0]
     assert result.loc[3, "guardrail_reason"] == "posterior_below_threshold"
+
+
+def test_trade_table_extracts_closed_and_open_trades() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1, 0, 1, 1]
+    frame["candidate_action"] = [0, 1, 1, 0, 1, 1]
+    frame["guardrail_reason"] = ["", "", "", "flat_exit", "", ""]
+    frame["turnover"] = frame["signal_position"].diff().abs().fillna(0.0)
+    frame["gross_strategy_return"] = [0.0, 0.0, 0.01, -0.02, 0.0, 0.03]
+    frame["execution_cost_bps"] = [0.0] * len(frame)
+    frame["transaction_cost"] = [0.0] * len(frame)
+    frame["net_strategy_return"] = frame["gross_strategy_return"]
+    frame["asset_wealth"] = (1.0 + frame["bar_return"]).cumprod()
+    frame["strategy_wealth"] = (1.0 + frame["net_strategy_return"]).cumprod()
+
+    trade_table = build_trade_table(frame)
+
+    assert len(trade_table) == 2
+    assert trade_table["status"].tolist() == ["closed", "open"]
+    assert trade_table["bars_held"].tolist() == [2, 1]
+    assert float(trade_table.iloc[0]["net_return"]) < 0.0
+    assert float(trade_table.iloc[1]["net_return"]) > 0.0
+
+
+def test_compute_metrics_includes_trade_level_fields() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    frame["signal_position"] = [0, 1, 1, 0, 1, 1]
+    frame["candidate_action"] = [0, 1, 1, 0, 1, 1]
+    frame["guardrail_reason"] = ["", "", "", "flat_exit", "", ""]
+    frame["turnover"] = frame["signal_position"].diff().abs().fillna(0.0)
+    frame["gross_strategy_return"] = [0.0, 0.0, 0.02, -0.005, 0.0, 0.01]
+    frame["execution_cost_bps"] = [0.0] * len(frame)
+    frame["transaction_cost"] = [0.0] * len(frame)
+    frame["net_strategy_return"] = frame["gross_strategy_return"]
+    frame["asset_wealth"] = (1.0 + frame["bar_return"]).cumprod()
+    frame["strategy_wealth"] = (1.0 + frame["net_strategy_return"]).cumprod()
+
+    metrics = compute_metrics(frame, "1hour")
+
+    assert {"bar_win_rate", "trade_win_rate", "expectancy", "profit_factor", "avg_mfe", "avg_mae", "open_trade_count"}.issubset(metrics)
+    assert metrics["win_rate"] == metrics["trade_win_rate"]
+    assert metrics["trades"] == 2.0
+    assert metrics["closed_trade_count"] == 1.0
+    assert metrics["open_trade_count"] == 1.0
 
 
 def test_parameter_sweep_produces_all_requested_combinations() -> None:
@@ -530,7 +606,10 @@ def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataF
     assert not result.fold_diagnostics.empty
     assert not result.state_stability.empty
     assert not result.forward_returns.empty
+    assert not result.trade_summary.empty
+    assert {"metric", "value"}.issubset(result.trade_summary.columns)
     assert "sharpe" in result.metrics
+    assert "trade_win_rate" in result.metrics
     assert "sharpe" in result.benchmark_metrics
 
 
@@ -570,6 +649,7 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
     )
     assert bundle.manifest_path.exists()
     assert bundle.files["signal_report_csv"].exists()
+    assert bundle.files["trade_summary_csv"].exists()
     assert bundle.files["timeframe_comparison_csv"].exists()
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)

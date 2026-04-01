@@ -21,9 +21,11 @@ from markov_regime.strategy import (
     apply_trading_rules,
     attach_state_action_columns,
     build_buy_and_hold_frame,
+    build_trade_table,
     compute_metrics,
     derive_state_actions,
     stress_test_transaction_costs,
+    summarize_trade_table,
 )
 
 
@@ -52,6 +54,8 @@ class WalkForwardResult:
     guardrail_summary: pd.DataFrame
     converged_ratio: float
     confirmation_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    trade_log: pd.DataFrame = field(default_factory=pd.DataFrame)
+    trade_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def suggest_walk_forward_config(
@@ -313,6 +317,8 @@ def run_walk_forward(
     forward_returns = _summarize_forward_returns(predictions)
     guardrail_summary = _guardrail_summary(predictions)
     converged_ratio = float(diagnostics["converged"].mean()) if not diagnostics.empty else 0.0
+    trade_log = build_trade_table(predictions)
+    trade_summary = summarize_trade_table(trade_log)
 
     return WalkForwardResult(
         n_states=model_config.n_states,
@@ -326,6 +332,8 @@ def run_walk_forward(
         forward_returns=forward_returns,
         guardrail_summary=guardrail_summary,
         converged_ratio=converged_ratio,
+        trade_log=trade_log,
+        trade_summary=trade_summary,
     )
 
 
