@@ -49,6 +49,17 @@ def _write_table(frame: pd.DataFrame, path: Path) -> Path:
     return path
 
 
+def _json_safe_scalar(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    return value
+
+
 def write_run_artifact_bundle(
     *,
     symbol: str,
@@ -74,6 +85,7 @@ def write_run_artifact_bundle(
     consensus_timeline: pd.DataFrame | None = None,
     consensus_summary: pd.DataFrame | None = None,
     consensus_mode_comparison: pd.DataFrame | None = None,
+    nested_holdout_summary: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -116,9 +128,11 @@ def write_run_artifact_bundle(
         files["consensus_summary_csv"] = _write_table(consensus_summary, root / "consensus_summary.csv")
     if consensus_mode_comparison is not None and not consensus_mode_comparison.empty:
         files["consensus_mode_comparison_csv"] = _write_table(consensus_mode_comparison, root / "consensus_mode_comparison.csv")
+    if nested_holdout_summary is not None and not nested_holdout_summary.empty:
+        files["nested_holdout_summary_csv"] = _write_table(nested_holdout_summary, root / "nested_holdout_summary.csv")
 
     manifest = {
-        "schema_version": 5,
+        "schema_version": 6,
         "run_id": run_id,
         "created_at_utc": created_at.isoformat(),
         "symbol": symbol,
@@ -147,6 +161,11 @@ def write_run_artifact_bundle(
             "performance_stitching": "blind_test_windows_only",
             "all_predictions_blind_oos": bool(selected_result.predictions.get("is_blind_oos", pd.Series(dtype=bool)).fillna(False).all()),
             "walk_forward_protocol": "train_validate_test_with_purge_and_embargo",
+            "nested_holdout": (
+                {key: _json_safe_scalar(value) for key, value in nested_holdout_summary.iloc[0].to_dict().items()}
+                if nested_holdout_summary is not None and not nested_holdout_summary.empty
+                else None
+            ),
         },
         "selected_result": {
             "n_states": selected_result.n_states,

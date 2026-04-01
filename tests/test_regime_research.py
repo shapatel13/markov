@@ -35,6 +35,7 @@ from markov_regime.research import (
     ensure_results_tsv,
     load_research_program,
     nested_holdout_evaluation,
+    nested_holdout_summary_frame,
     run_feature_pack_comparison,
     write_research_program,
 )
@@ -48,6 +49,7 @@ from markov_regime.strategy import (
     derive_state_actions,
     estimate_execution_cost_bps,
     parameter_sweep,
+    replay_strategy,
     stress_test_transaction_costs,
     summarize_trade_table,
 )
@@ -865,6 +867,59 @@ def test_nested_holdout_evaluation_returns_outer_metrics() -> None:
     assert {"outer_holdout_sharpe", "selected_inner_posterior_threshold", "selected_inner_required_confirmations"}.issubset(nested)
 
 
+def test_nested_holdout_summary_frame_formats_status_and_selection() -> None:
+    rows = nested_holdout_summary_frame(
+        {
+            "status": "ok",
+            "outer_holdout_folds": 1.0,
+            "outer_holdout_sharpe": 0.84,
+            "outer_holdout_annualized_return": 0.12,
+            "outer_holdout_trades": 4.0,
+            "selected_inner_posterior_threshold": 0.7,
+            "selected_inner_min_hold_bars": 6.0,
+            "selected_inner_cooldown_bars": 4.0,
+            "selected_inner_required_confirmations": 2.0,
+            "selection_score": 1.25,
+        }
+    )
+    lookup = rows.set_index("component")
+
+    assert lookup.loc["Nested Holdout Status", "value"] == "Ok"
+    assert lookup.loc["Outer Holdout Sharpe", "value"] == "0.84"
+    assert lookup.loc["Selected Confirmations", "value"] == 2
+    assert "trustworthy than the best row" in lookup.loc["Outer Holdout Sharpe", "interpretation"]
+
+
+def test_replay_strategy_applies_consensus_overlay_when_requested() -> None:
+    frame = _signal_input_frame([0.9, 0.9, 0.9, 0.9])
+    frame["fold_id"] = [0, 0, 0, 0]
+    frame["state_action_0"] = [1, 1, 1, 1]
+    frame["validation_edge_0"] = [0.02, 0.02, 0.02, 0.02]
+    frame["score_lower_0"] = [0.01, 0.01, 0.01, 0.01]
+    frame["score_upper_0"] = [0.03, 0.03, 0.03, 0.03]
+    frame["consistent_horizons_0"] = [3, 3, 3, 3]
+    frame["consensus_timestamp"] = frame["timestamp"]
+    frame["consensus_position"] = [1, 1, 1, 1]
+    frame["consensus_candidate"] = [1, 1, 1, 1]
+    frame["consensus_position_share"] = [0.8, 0.8, 0.55, 0.55]
+    frame["consensus_candidate_share"] = [0.8, 0.8, 0.55, 0.55]
+
+    replayed, _ = replay_strategy(
+        frame,
+        n_states=1,
+        config=StrategyConfig(
+            required_confirmations=1,
+            require_consensus_confirmation=True,
+            consensus_min_share=0.67,
+            consensus_gate_mode="hard",
+        ),
+        interval="4hour",
+    )
+
+    assert replayed["signal_position"].tolist() == [1, 1, 0, 0]
+    assert replayed["guardrail_reason"].tolist()[-1] == "consensus_weak_share"
+
+
 def test_feature_pack_comparison_runs_on_synthetic_prices(synthetic_prices: pd.DataFrame) -> None:
     comparison = run_feature_pack_comparison(
         price_frame=synthetic_prices,
@@ -936,6 +991,17 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
         metadata={"feature_pack": "baseline"},
         timeframe_comparison=pd.DataFrame([{"interval": "4hour", "status": "ok", "sharpe": result.metrics["sharpe"]}]),
         consensus_mode_comparison=pd.DataFrame([{"mode": "off", "label": "No Consensus", "selected": True, "sharpe": result.metrics["sharpe"]}]),
+        nested_holdout_summary=pd.DataFrame(
+            [
+                {
+                    "status": "ok",
+                    "outer_holdout_folds": 1.0,
+                    "outer_holdout_sharpe": result.metrics["sharpe"],
+                    "outer_holdout_annualized_return": result.metrics["annualized_return"],
+                    "outer_holdout_trades": result.metrics["trades"],
+                }
+            ]
+        ),
         export_dir=tmp_path,
     )
     assert bundle.manifest_path.exists()
@@ -943,8 +1009,10 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
     assert bundle.files["trade_summary_csv"].exists()
     assert bundle.files["timeframe_comparison_csv"].exists()
     assert bundle.files["consensus_mode_comparison_csv"].exists()
+    assert bundle.files["nested_holdout_summary_csv"].exists()
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)
     assert manifest["metadata"]["feature_pack"] == "baseline"
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     assert manifest["methodology"]["performance_stitching"] == "blind_test_windows_only"
+    assert manifest["methodology"]["nested_holdout"]["status"] == "ok"

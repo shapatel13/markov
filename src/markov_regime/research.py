@@ -671,6 +671,70 @@ def nested_holdout_evaluation(
     }
 
 
+def nested_holdout_summary_frame(summary: dict[str, object]) -> pd.DataFrame:
+    status = str(summary.get("status", "unknown"))
+    status_interpretation = {
+        "ok": "Inner folds picked the sweep settings, and the untouched outer fold scored those settings afterward.",
+        "insufficient_folds": "There were not enough walk-forward folds to reserve a separate outer holdout slice.",
+    }.get(status, "Nested holdout status was not recognized.")
+    rows = [
+        {
+            "component": "Nested Holdout Status",
+            "value": status.replace("_", " ").title(),
+            "interpretation": status_interpretation,
+        },
+        {
+            "component": "Outer Holdout Folds",
+            "value": int(float(summary.get("outer_holdout_folds", 0.0))),
+            "interpretation": "These are the most recent untouched folds used only to judge the settings chosen on earlier folds.",
+        },
+        {
+            "component": "Outer Holdout Sharpe",
+            "value": f"{float(summary.get('outer_holdout_sharpe', 0.0)):.2f}",
+            "interpretation": "This is the holdout-aware Sharpe after inner-fold selection, so it is more trustworthy than the best row from the diagnostic sweep.",
+        },
+        {
+            "component": "Outer Holdout Annualized Return",
+            "value": f"{float(summary.get('outer_holdout_annualized_return', 0.0)):.1%}",
+            "interpretation": "This is the stitched return across the reserved outer folds only, not the in-sample or validation slices.",
+        },
+        {
+            "component": "Outer Holdout Trades",
+            "value": int(float(summary.get("outer_holdout_trades", 0.0))),
+            "interpretation": "Very low trade counts make even a positive holdout score fragile, so read this together with Sharpe and bootstrap results.",
+        },
+        {
+            "component": "Selected Posterior Threshold",
+            "value": f"{float(summary.get('selected_inner_posterior_threshold', 0.0)):.2f}",
+            "interpretation": "Chosen on the inner folds only. Higher values demand cleaner state confidence before entering.",
+        },
+        {
+            "component": "Selected Min Hold",
+            "value": int(float(summary.get("selected_inner_min_hold_bars", 0.0))),
+            "interpretation": "Chosen on the inner folds only. Higher values make positions stickier and reduce churn.",
+        },
+        {
+            "component": "Selected Cooldown",
+            "value": int(float(summary.get("selected_inner_cooldown_bars", 0.0))),
+            "interpretation": "Chosen on the inner folds only. Higher values force the strategy to wait longer after exiting.",
+        },
+        {
+            "component": "Selected Confirmations",
+            "value": int(float(summary.get("selected_inner_required_confirmations", 0.0))),
+            "interpretation": "Chosen on the inner folds only. Higher values require more repeated directional agreement before entering.",
+        },
+    ]
+    if "selection_score" in summary:
+        rows.append(
+            {
+                "component": "Inner Selection Score",
+                "value": f"{float(summary['selection_score']):.2f}",
+                "interpretation": "This ranks candidate parameter rows on the inner folds. It is useful for selection, but the outer holdout decides whether that choice generalizes.",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def run_autoresearch(
     *,
     program: ResearchProgram,
@@ -816,6 +880,7 @@ def run_autoresearch(
                 "strategy_config": strategy_config,
                 "selected_result": result,
                 "robustness": robustness,
+                "nested_summary": nested_summary,
             }
         except Exception as exc:
             rows.append(
@@ -906,6 +971,7 @@ def run_autoresearch(
             notes=notes,
             robustness=context["robustness"],
             feature_columns=candidate_feature_columns,
+            nested_holdout_summary=pd.DataFrame([context["nested_summary"]]),
             metadata={
                 "experiment_id": row.experiment_id,
                 "feature_pack": context["feature_pack"],
