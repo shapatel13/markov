@@ -7,6 +7,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Fetches daily or hourly bars from Financial Modeling Prep and locally resamples complete `4hour` candles from hourly data.
 - Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, and realized skew/kurtosis structure.
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
+- Stitches performance only from the blind test slices and keeps train / validate periods out of headline return metrics.
 - Compares 5 through 9 HMM states side by side.
 - Compares `4hour`, `1day`, and `1hour` operating modes so higher-timeframe trades can be judged against both the slower swing lane and the noisier intraday baseline.
 - Supports an optional `4hour` execution filter that only blocks trades when the daily lane clearly disagrees, while allowing neutral daily bars to pass through without adding conviction.
@@ -110,11 +111,14 @@ python -m streamlit run app.py
 ## Methodology Notes
 
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
+- The app now includes a dedicated `Methodology` panel showing the walk-forward schedule, current friction assumptions, and promotion gates for the active run.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
+- The higher-timeframe defaults now approximate a `12 months train / 3 months validate / 3 months blind test` cadence on `4hour` and `1day`.
 - The optional daily confirmation filter acts as an execution veto, not a second alpha model. Daily neutrality is allowed; clear daily opposition blocks the `4hour` trade.
 - State labels are re-aligned after every refit because raw HMM state IDs are not stable.
 - Directional actions come from validation-window forward returns, not the in-sample training fit.
 - The strategy prefers flat exposure when posterior confidence is marginal or when validation support is weak.
+- Default direct fee friction is now `10 bps` before spread, slippage, and impact, so backtests do not assume unrealistically cheap crypto execution.
 - Major metrics are paired with moving block bootstrap confidence intervals to avoid treating a single backtest path as definitive.
 - Every app run writes a local artifact bundle in `artifacts/` with the config snapshot, manifest, model tables, robustness table, and signal report.
 - The displayed strategy performance is now compared against buy-and-hold on the same test slices.
@@ -127,6 +131,7 @@ python -m streamlit run app.py
 - State stability table across retrains.
 - Regime-conditioned forward return table for 1, 3, 6, 12, 24, and 72 bars.
 - Sensitivity plots for posterior threshold, min hold, cooldown, and confirmation count.
+- Methodology and promotion-gate tables for the active run.
 - Cross-asset robustness table for the configured basket.
 - `4hour` vs `1day` vs `1hour` comparison table for the primary symbol.
 - Artifact manifests and CSV snapshots in `artifacts/`.
@@ -139,6 +144,7 @@ python -m streamlit run app.py
 - [`research_program.md`](research_program.md) defines the safe search space and the frozen evaluator rules.
 - `results.tsv` is local and ignored by Git, so you can run repeated experiment batches without dirtying the repo.
 - The scoring loop is intentionally conservative: it ranks candidates using Sharpe, bootstrap lower bounds, state stability, benchmark-relative return, cost breakpoints, and robustness instead of raw win rate alone.
+- UI parameter sweeps are diagnostic only. They replay alternate thresholds on the already-observed out-of-sample path and should not be treated as blind model selection.
 - The search space now includes feature packs, so autoresearch can test whether the signal improves because the model sees a better market description, not just because entry filters were retuned.
 - The autoresearch score now also checks early-vs-late fold confirmation so a candidate that only looks good in one part of the sample is penalized.
 - The top-ranked candidates automatically get artifact bundles in `artifacts/` so they can be inspected in the same format as manual app runs.

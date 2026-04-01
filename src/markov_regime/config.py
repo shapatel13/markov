@@ -53,7 +53,7 @@ class StrategyConfig:
     validation_shrinkage: float = 30.0
     min_consistent_horizons: int = 2
     allow_short: bool = False
-    cost_bps: float = 2.0
+    cost_bps: float = 10.0
     spread_bps: float = 4.0
     slippage_bps: float = 3.0
     impact_bps: float = 2.0
@@ -82,21 +82,21 @@ def bars_per_year(interval: Interval) -> int:
 def default_walk_forward_config(interval: Interval) -> WalkForwardConfig:
     if interval == "4hour":
         return WalkForwardConfig(
-            train_bars=420,
-            purge_bars=2,
-            validate_bars=84,
-            embargo_bars=2,
-            test_bars=84,
-            refit_stride_bars=84,
+            train_bars=365 * 6,
+            purge_bars=6,
+            validate_bars=90 * 6,
+            embargo_bars=6,
+            test_bars=90 * 6,
+            refit_stride_bars=90 * 6,
         )
     if interval == "1day":
         return WalkForwardConfig(
-            train_bars=360,
-            purge_bars=1,
-            validate_bars=63,
-            embargo_bars=1,
-            test_bars=63,
-            refit_stride_bars=63,
+            train_bars=365,
+            purge_bars=2,
+            validate_bars=90,
+            embargo_bars=2,
+            test_bars=90,
+            refit_stride_bars=90,
         )
     return WalkForwardConfig(
         train_bars=720,

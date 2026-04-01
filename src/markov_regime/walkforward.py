@@ -274,6 +274,8 @@ def run_walk_forward(
         signal_frame["validate_end_time"] = validate_frame["timestamp"].iloc[-1]
         signal_frame["test_start_time"] = test_frame["timestamp"].iloc[0]
         signal_frame["test_end_time"] = test_frame["timestamp"].iloc[-1]
+        signal_frame["oos_segment"] = "blind_test"
+        signal_frame["is_blind_oos"] = True
         prediction_frames.append(signal_frame)
 
         fold_metrics = compute_metrics(signal_frame, interval)
@@ -287,6 +289,12 @@ def run_walk_forward(
                 "validate_end": window.validate_end,
                 "test_start": window.test_start,
                 "test_end": window.test_end,
+                "train_start_time": str(pd.to_datetime(train_frame["timestamp"].iloc[0])),
+                "train_end_time": str(pd.to_datetime(train_frame["timestamp"].iloc[-1])),
+                "validate_start_time": str(pd.to_datetime(validate_frame["timestamp"].iloc[0])),
+                "validate_end_time": str(pd.to_datetime(validate_frame["timestamp"].iloc[-1])),
+                "test_start_time": str(pd.to_datetime(test_frame["timestamp"].iloc[0])),
+                "test_end_time": str(pd.to_datetime(test_frame["timestamp"].iloc[-1])),
                 "purge_bars": walk_config.purge_bars,
                 "embargo_bars": walk_config.embargo_bars,
                 "converged": fitted.converged,
