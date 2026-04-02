@@ -740,6 +740,45 @@ def test_build_execution_plan_surfaces_enter_long_levels() -> None:
     assert "99.00" in plan["entry_guide"]
 
 
+def test_build_execution_plan_surfaces_enter_short_levels() -> None:
+    plan = build_execution_plan(
+        latest_row={
+            "timestamp": pd.Timestamp("2025-01-01 04:00:00"),
+            "signal_position": 0,
+            "candidate_action": -1,
+            "guardrail_reason": "accepted",
+            "close": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+        },
+        interval="4hour",
+        live_price=99.5,
+    )
+
+    assert plan["action"] == "Enter Short"
+    assert "99.00" in plan["entry_guide"]
+    assert "101.00" in plan["entry_guide"]
+
+
+def test_build_execution_plan_supports_hold_short() -> None:
+    plan = build_execution_plan(
+        latest_row={
+            "timestamp": pd.Timestamp("2025-01-01 04:00:00"),
+            "signal_position": -1,
+            "candidate_action": -1,
+            "guardrail_reason": "accepted",
+            "close": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+        },
+        interval="4hour",
+        live_price=99.5,
+    )
+
+    assert plan["action"] == "Hold Short"
+    assert "already carrying short exposure" in plan["entry_guide"]
+
+
 def test_control_interpretation_describes_cautious_filters() -> None:
     rows = build_control_interpretation_rows(
         interval="4hour",
@@ -762,6 +801,20 @@ def test_control_interpretation_describes_cautious_filters() -> None:
     assert "balanced" in lookup.loc["Posterior Threshold", "interpretation"].lower()
     assert "sticky" in lookup.loc["Min Hold", "interpretation"].lower()
     assert "anti-whipsaw" in lookup.loc["Cooldown", "interpretation"].lower()
+    assert lookup.loc["Allow Shorts", "value"] == "off"
+
+
+def test_control_interpretation_describes_short_enablement() -> None:
+    rows = build_control_interpretation_rows(
+        interval="4hour",
+        feature_pack="trend",
+        walk_config=WalkForwardConfig(train_bars=420, purge_bars=2, validate_bars=84, embargo_bars=2, test_bars=84, refit_stride_bars=84),
+        strategy_config=StrategyConfig(allow_short=True),
+    )
+    lookup = rows.set_index("control")
+
+    assert lookup.loc["Allow Shorts", "value"] == "on"
+    assert "bearish regimes can become actual short trades" in lookup.loc["Allow Shorts", "interpretation"]
 
 
 def test_promotion_gates_require_more_than_positive_sharpe() -> None:

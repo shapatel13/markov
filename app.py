@@ -128,6 +128,7 @@ with st.sidebar.form("controls"):
     cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4, help=CONTROL_HELP["cooldown_bars"])
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
+    allow_short = st.checkbox("Allow short trades", value=False, help=CONTROL_HELP["allow_short"])
     require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
     consensus_gate_mode = st.selectbox(
@@ -173,6 +174,7 @@ if run_clicked:
                 cooldown_bars=int(cooldown_bars),
                 required_confirmations=int(required_confirmations),
                 confidence_gap=confidence_gap,
+                allow_short=allow_short,
                 require_daily_confirmation=require_daily_confirmation,
                 require_consensus_confirmation=require_consensus_confirmation,
                 consensus_min_share=consensus_min_share,
@@ -506,6 +508,8 @@ if analysis["confirmation_enabled"]:
     st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
 if analysis["strategy_config"].require_consensus_confirmation:
     st.caption("Consensus Filter shows whether nearby seeds and state counts agree strongly enough with the current direction to allow exposure.")
+if analysis["strategy_config"].allow_short:
+    st.caption("Shorts are enabled, so bearish validated regimes can surface as `Enter Short` or `Hold Short` instead of only flattening exposure.")
 st.caption("Headline metrics are stitched only from blind test windows. Training and validation slices are excluded from performance totals.")
 st.caption(f"Latest guardrail status: `{guardrail_text}` | Data provider: `Financial Modeling Prep` | Data request: `{analysis['data_url']}`")
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
