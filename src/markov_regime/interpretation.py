@@ -24,6 +24,7 @@ CONTROL_HELP: dict[str, str] = {
     "cooldown_bars": "Bars to stay flat after a position closes. Higher values reduce whipsaws but may miss quick re-entries.",
     "required_confirmations": "Consecutive qualifying bars required before a new position can open. Higher values are stricter.",
     "confidence_gap": "Minimum gap between the top two posterior state probabilities. Higher values force cleaner separation between competing regimes.",
+    "allow_short": "When enabled, validated bearish regimes may map to short trades instead of only flattening exposure. Leave this off unless you explicitly want two-sided signals.",
     "require_daily_confirmation": "When enabled on `4hour`, the strategy only executes exposure when the latest daily lane agrees with the 4H direction.",
     "require_consensus_confirmation": "When enabled, the strategy only executes exposure when nearby seeds and state counts broadly agree with the current direction.",
     "consensus_min_share": "Minimum agreement share required across the consensus panel before a trade is allowed. Higher values are stricter.",
@@ -180,6 +181,18 @@ def build_execution_plan(
     reference_price = live_price if live_price is not None else latest_close
     bar_label = {"1hour": "1H", "4hour": "4H", "1day": "1D"}[interval]
 
+    if current_position == 0 and candidate_action == -1 and guardrail_reason == "accepted":
+        return {
+            "action": "Enter Short",
+            "severity": "success",
+            "summary": f"The latest completed {bar_label} bar qualifies for a fresh short entry.",
+            "entry_guide": (
+                f"Aggressive entry: around {reference_price:,.2f}. "
+                f"Conservative trigger: only if price is still below the last completed {bar_label} low at {latest_low:,.2f}. "
+                f"Invalidate back above {latest_high:,.2f}."
+            ),
+            "timing_note": f"This strategy acts on completed {bar_label} bars, so treat intrabar moves before {signal_time} as noise rather than confirmed signals." if signal_time is not None else f"This strategy acts on completed {bar_label} bars, not intrabar spikes.",
+        }
     if current_position == 0 and candidate_action == 1 and guardrail_reason == "accepted":
         return {
             "action": "Enter Long",
@@ -200,6 +213,14 @@ def build_execution_plan(
             "entry_guide": "No fresh entry is needed because the model is already carrying exposure.",
             "timing_note": f"Only treat a new completed {bar_label} bar as actionable. This is not a tick-by-tick execution model.",
         }
+    if current_position == -1 and candidate_action == -1 and guardrail_reason == "accepted":
+        return {
+            "action": "Hold Short",
+            "severity": "success",
+            "summary": f"The strategy is already short and the latest completed {bar_label} bar still supports staying short.",
+            "entry_guide": "No fresh entry is needed because the model is already carrying short exposure.",
+            "timing_note": f"Only treat a new completed {bar_label} bar as actionable. This is not a tick-by-tick execution model.",
+        }
     if current_position == 1 and candidate_action == 0:
         return {
             "action": "Hold / No Add",
@@ -208,12 +229,25 @@ def build_execution_plan(
             "entry_guide": "Do not add here. Wait for the next completed bar to restore an accepted long candidate before considering any new entry.",
             "timing_note": describe_guardrail(guardrail_reason, current_position=current_position, candidate_action=candidate_action),
         }
+    if current_position == -1 and candidate_action == 0:
+        return {
+            "action": "Hold Short / No Add",
+            "severity": "warning",
+            "summary": f"The model is still carrying a short from earlier, but the latest completed {bar_label} bar does not justify a fresh add.",
+            "entry_guide": "Do not add here. Wait for the next completed bar to restore an accepted short candidate before considering any new entry.",
+            "timing_note": describe_guardrail(guardrail_reason, current_position=current_position, candidate_action=candidate_action),
+        }
     if current_position == 0 and guardrail_reason == "waiting_for_confirmations":
+        direction = "long" if candidate_action >= 0 else "short"
+        reference = latest_high if direction == "long" else latest_low
         return {
             "action": "Wait",
             "severity": "warning",
-            "summary": f"The direction is constructive, but the model still needs more consecutive {bar_label} confirmations before entering.",
-            "entry_guide": f"Wait for another completed {bar_label} bar that keeps the long candidate alive. A conservative reference is the last {bar_label} high at {latest_high:,.2f}.",
+            "summary": f"A directional setup is emerging, but the model still needs more consecutive {bar_label} confirmations before entering.",
+            "entry_guide": (
+                f"Wait for another completed {bar_label} bar that keeps the {direction} candidate alive. "
+                f"A conservative reference is the last {bar_label} {'high' if direction == 'long' else 'low'} at {reference:,.2f}."
+            ),
             "timing_note": "This is a confirmation delay, not a missed trade. The filter is trying to reduce one-bar noise.",
         }
     return {
@@ -878,15 +912,24 @@ def build_control_interpretation_rows(
             "value": f"{strategy_config.validation_shrinkage:.0f}",
             "interpretation": "Higher shrinkage pulls thin-sample validation edges back toward zero, which makes the state labels more conservative.",
         },
-        {
-            "control": "Consistent Horizons Required",
-            "value": f"{strategy_config.min_consistent_horizons}",
-            "interpretation": "This is the number of scored horizons that must agree before a state can be labeled as directional.",
-        },
-        {
-            "control": "Daily Confirmation Filter",
-            "value": "on" if strategy_config.require_daily_confirmation else "off",
-            "interpretation": (
+          {
+              "control": "Consistent Horizons Required",
+              "value": f"{strategy_config.min_consistent_horizons}",
+              "interpretation": "This is the number of scored horizons that must agree before a state can be labeled as directional.",
+          },
+          {
+              "control": "Allow Shorts",
+              "value": "on" if strategy_config.allow_short else "off",
+              "interpretation": (
+                  "Validated bearish regimes can become actual short trades instead of only flattening the book."
+                  if strategy_config.allow_short
+                  else "Bearish regimes can only flatten exposure, not open outright short positions."
+              ),
+          },
+          {
+              "control": "Daily Confirmation Filter",
+              "value": "on" if strategy_config.require_daily_confirmation else "off",
+              "interpretation": (
                 "Daily confirmation is enforcing agreement between the slower daily lane and the 4H execution lane."
                 if strategy_config.require_daily_confirmation
                 else "Daily confirmation is off, so the 4H lane trades on its own."
