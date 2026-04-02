@@ -16,11 +16,12 @@ from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepC
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
-from markov_regime.data import fetch_price_data
+from markov_regime.data import fetch_live_quote, fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
     CONTROL_HELP,
     build_control_interpretation_rows,
+    build_execution_plan,
     build_metric_interpretation_rows,
     build_promotion_gate_rows,
     build_trust_snapshot,
@@ -57,6 +58,11 @@ from markov_regime.walkforward import compare_state_counts, summarize_state_coun
 from markov_regime.walkforward import suggest_walk_forward_config
 
 st.set_page_config(page_title="Markov Regime Research", layout="wide")
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def load_live_quote_cached(symbol: str):
+    return fetch_live_quote(symbol)
 
 st.markdown(
     """
@@ -141,6 +147,11 @@ with st.sidebar.form("controls"):
     run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
+
+refresh_live_quote = st.sidebar.button("Refresh live quote")
+if refresh_live_quote:
+    load_live_quote_cached.clear()
+    st.rerun()
 
 if run_clicked:
     try:
@@ -392,6 +403,17 @@ nested_holdout_table = analysis.get("nested_holdout_table", pd.DataFrame())
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
 guardrail_text = latest_row["guardrail_reason"] or "accepted"
+live_quote = None
+live_quote_error = ""
+try:
+    live_quote = load_live_quote_cached(analysis["resolved_symbol"])
+except Exception as exc:  # pragma: no cover - depends on live vendor behavior
+    live_quote_error = str(exc)
+execution_plan = build_execution_plan(
+    latest_row=latest_row.to_dict(),
+    interval=analysis["interval"],
+    live_price=float(live_quote.price) if live_quote is not None else None,
+)
 metric_interpretation = build_metric_interpretation_rows(
     latest_row=latest_row.to_dict(),
     metrics=selected_result.metrics,
@@ -433,6 +455,7 @@ trust_snapshot = build_trust_snapshot(
 metric_lookup = metric_interpretation.set_index("metric")
 
 metric_items = [
+    ("Action Now", execution_plan["action"], first_sentence(execution_plan["summary"])),
     ("Current State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
     ("Held Position", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),
     ("Latest Candidate", str(metric_lookup.loc["Latest Candidate", "value"]), first_sentence(str(metric_lookup.loc["Latest Candidate", "interpretation"]))),
@@ -440,6 +463,10 @@ metric_items = [
 if "Daily Confirmation" in metric_lookup.index:
     metric_items.append(
         ("Daily Confirmation", str(metric_lookup.loc["Daily Confirmation", "value"]), first_sentence(str(metric_lookup.loc["Daily Confirmation", "interpretation"])))
+    )
+if "Consensus Filter" in metric_lookup.index:
+    metric_items.append(
+        ("Consensus", str(metric_lookup.loc["Consensus Filter", "value"]), first_sentence(str(metric_lookup.loc["Consensus Filter", "interpretation"])))
     )
 metric_items.extend(
     [
@@ -466,6 +493,13 @@ elif trust_snapshot["severity"] == "error":
     st.error(trust_message)
 else:
     st.warning(trust_message)
+
+if execution_plan["severity"] == "success":
+    st.success(f"{execution_plan['action']}: {execution_plan['summary']}")
+else:
+    st.warning(f"{execution_plan['action']}: {execution_plan['summary']}")
+st.caption(execution_plan["entry_guide"])
+st.caption(execution_plan["timing_note"])
 
 st.caption("Held Position shows the active book. Latest Candidate shows what the newest bar alone supports before hold and cooldown mechanics are applied.")
 if analysis["confirmation_enabled"]:
@@ -497,13 +531,14 @@ else:
         f"embargo={current_walk.embargo_bars}, test={current_walk.test_bars}, stride={current_walk.refit_stride_bars}"
     )
 
-data_columns = st.columns(5)
+data_columns = st.columns(6)
 data_items = [
     ("Requested Symbol", analysis["symbol"]),
     ("Resolved Symbol", analysis["resolved_symbol"]),
     ("Fetched Rows", f"{analysis['raw_rows']}"),
     ("Usable Rows", f"{analysis['available_rows']}"),
-    ("Latest Close", f"{analysis['latest_close']:,.2f}"),
+    ("Last Completed Bar", f"{analysis['latest_close']:,.2f}"),
+    ("Live Quote", f"{live_quote.price:,.2f}" if live_quote is not None else "unavailable"),
 ]
 for column, (label, value) in zip(data_columns, data_items, strict=True):
     column.markdown(f"<div class='metric-card'><strong>{label}</strong><br><span style='font-size:1.15rem'>{value}</span></div>", unsafe_allow_html=True)
@@ -514,6 +549,20 @@ st.caption(
     f"{pd.Timestamp(analysis['feature_start']).strftime('%Y-%m-%d %H:%M')} to "
     f"{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')} usable feature bars"
 )
+if live_quote is not None and live_quote.timestamp is not None:
+    quote_time = live_quote.timestamp.tz_convert("America/New_York")
+    quote_age_seconds = max((pd.Timestamp.now(tz="America/New_York") - quote_time).total_seconds(), 0.0)
+    quote_age_label = f"{quote_age_seconds / 60:.1f} minutes" if quote_age_seconds >= 60 else f"{quote_age_seconds:.0f} seconds"
+    st.caption(
+        f"Live quote source: `{live_quote.source_url}` | Quote time: `{quote_time.strftime('%Y-%m-%d %H:%M:%S %Z')}` | "
+        f"Quote age: `{quote_age_label}` | Exchange: `{live_quote.exchange or 'n/a'}`"
+    )
+    st.caption(
+        f"Signal timing note: the live quote is a market reference, but the model itself only updates on completed `{analysis['interval']}` bars. "
+        f"The latest completed model bar ended at `{pd.Timestamp(analysis['feature_end']).strftime('%Y-%m-%d %H:%M')}`."
+    )
+elif live_quote_error:
+    st.warning(f"Live quote fetch was unavailable: {live_quote_error}")
 
 overview_tab, trades_tab, baselines_tab, interpretation_tab, methodology_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
     ["Overview", "Trades", "Baselines", "Interpretation", "Methodology", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]

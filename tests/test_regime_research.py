@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlencode
 
 import numpy as np
 import pandas as pd
+import requests
 
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.baselines import build_daily_trend_filter_baseline, summarize_baselines
@@ -18,11 +20,12 @@ from markov_regime.consensus import (
 )
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
-from markov_regime.data import normalize_symbol
+from markov_regime.data import fetch_live_quote, normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
     build_control_interpretation_rows,
+    build_execution_plan,
     build_metric_interpretation_rows,
     build_promotion_gate_rows,
     build_trust_snapshot,
@@ -72,6 +75,32 @@ def _signal_input_frame(max_posteriors: list[float]) -> pd.DataFrame:
         }
     )
     return base
+
+
+class _FakeResponse:
+    def __init__(self, url: str, payload: object, status_code: int = 200) -> None:
+        self.url = url
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"status={self.status_code}")
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, responses: dict[str, _FakeResponse]) -> None:
+        self.responses = responses
+
+    def get(self, url: str, params: dict[str, str] | None = None, timeout: int | None = None) -> _FakeResponse:
+        _ = timeout
+        if url in self.responses:
+            return self.responses[url]
+        rendered = f"{url}?{urlencode(params or {})}"
+        return _FakeResponse(rendered, [], status_code=404)
 
 
 def _consensus_comparison_fixture() -> tuple[WalkForwardResult, ConsensusDiagnostics]:
@@ -646,6 +675,71 @@ def test_metric_interpretation_explains_held_position_vs_candidate() -> None:
     assert "older position may still be held" in lookup.loc["Guardrail Status", "interpretation"]
 
 
+def test_metric_interpretation_humanizes_daily_confirmation_status() -> None:
+    rows = build_metric_interpretation_rows(
+        latest_row={
+            "signal_position": 0,
+            "candidate_action": 0,
+            "canonical_state": 3,
+            "guardrail_reason": "no_directional_edge",
+            "max_posterior": 0.78,
+            "confidence_gap": 0.06,
+            "confirmation_status": "no_primary_signal",
+            "confirmation_effective_direction": 0,
+            "confirmation_interval": "1day",
+        },
+        metrics={"sharpe": 0.14, "annualized_return": -0.002, "confidence_coverage": 0.1, "trades": 3.0},
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -1.0, "upper": 1.5}]),
+        state_stability=pd.DataFrame([{"canonical_state": 0, "stability_score": 0.7}]),
+        robustness=pd.DataFrame([{"symbol": "BTCUSD", "status": "ok", "sharpe": -0.2}]),
+        interval="4hour",
+        available_rows=512,
+        walk_adjusted=True,
+    )
+    lookup = rows.set_index("metric")
+
+    assert lookup.loc["Daily Confirmation", "value"] == "No Primary Signal (Flat)"
+
+
+def test_build_execution_plan_flags_no_entry_when_guardrail_blocks() -> None:
+    plan = build_execution_plan(
+        latest_row={
+            "timestamp": pd.Timestamp("2025-01-01 04:00:00"),
+            "signal_position": 0,
+            "candidate_action": 0,
+            "guardrail_reason": "no_directional_edge",
+            "close": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+        },
+        interval="4hour",
+        live_price=100.5,
+    )
+
+    assert plan["action"] == "No Entry"
+    assert "no valid live entry level" in plan["entry_guide"].lower()
+
+
+def test_build_execution_plan_surfaces_enter_long_levels() -> None:
+    plan = build_execution_plan(
+        latest_row={
+            "timestamp": pd.Timestamp("2025-01-01 04:00:00"),
+            "signal_position": 0,
+            "candidate_action": 1,
+            "guardrail_reason": "accepted",
+            "close": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+        },
+        interval="4hour",
+        live_price=100.5,
+    )
+
+    assert plan["action"] == "Enter Long"
+    assert "101.00" in plan["entry_guide"]
+    assert "99.00" in plan["entry_guide"]
+
+
 def test_control_interpretation_describes_cautious_filters() -> None:
     rows = build_control_interpretation_rows(
         interval="4hour",
@@ -694,6 +788,36 @@ def test_promotion_gates_require_more_than_positive_sharpe() -> None:
 
 def test_default_strategy_config_prefers_entry_only_consensus_mode() -> None:
     assert StrategyConfig().consensus_gate_mode == "entry_only"
+
+
+def test_fetch_live_quote_parses_quote_payload() -> None:
+    response = _FakeResponse(
+        "https://financialmodelingprep.com/stable/quote?symbol=BTCUSD&apikey=%2A%2A%2A",
+        [
+            {
+                "symbol": "BTCUSD",
+                "price": 67166.33,
+                "change": -946.02,
+                "changePercentage": -1.38891,
+                "volume": 460780205,
+                "dayLow": 65696.96,
+                "dayHigh": 68652.0,
+                "marketCap": 1341485570894,
+                "open": 68112.34,
+                "previousClose": 68112.35,
+                "exchange": "CRYPTO",
+                "timestamp": 1775148953,
+            }
+        ],
+    )
+    session = _FakeSession({"https://financialmodelingprep.com/stable/quote": response})
+
+    quote = fetch_live_quote("BTC", api_key="test-key", session=session)
+
+    assert quote.symbol == "BTCUSD"
+    assert quote.price == 67166.33
+    assert quote.exchange == "CRYPTO"
+    assert quote.timestamp is not None
 
 
 def test_ensure_results_tsv_writes_header(tmp_path: Path) -> None:

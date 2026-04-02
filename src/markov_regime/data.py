@@ -21,6 +21,23 @@ class DataFetchResult:
     resolved_symbol: str
 
 
+@dataclass(frozen=True)
+class LiveQuote:
+    symbol: str
+    price: float
+    change: float | None
+    change_percentage: float | None
+    volume: float | None
+    open: float | None
+    previous_close: float | None
+    day_low: float | None
+    day_high: float | None
+    market_cap: float | None
+    exchange: str | None
+    timestamp: pd.Timestamp | None
+    source_url: str
+
+
 CRYPTO_ALIASES: dict[str, str] = {
     "BTC": "BTCUSD",
     "BTC-USD": "BTCUSD",
@@ -72,6 +89,18 @@ def _legacy_daily_url(symbol: str) -> str:
     return f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}"
 
 
+def _quote_url(symbol: str) -> str:
+    return "https://financialmodelingprep.com/stable/quote"
+
+
+def _quote_short_url(symbol: str) -> str:
+    return "https://financialmodelingprep.com/stable/quote-short"
+
+
+def _legacy_quote_url(symbol: str) -> str:
+    return f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
+
+
 def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
     if interval == "1day" and isinstance(payload, dict):
         records = payload.get("historical", [])
@@ -109,6 +138,21 @@ def _redact_api_key(url: str) -> str:
     query_items = parse_qsl(parts.query, keep_blank_values=True)
     redacted_query = [(key, "***" if key.lower() == "apikey" else value) for key, value in query_items]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(redacted_query), parts.fragment))
+
+
+def _normalize_quote(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, list):
+        if not payload:
+            raise ValueError("No quote data returned from Financial Modeling Prep.")
+        quote = payload[0]
+    elif isinstance(payload, dict):
+        quote = payload
+    else:
+        raise ValueError("Quote payload from Financial Modeling Prep is not in a supported format.")
+
+    if "price" not in quote:
+        raise ValueError("Quote payload is missing a price field.")
+    return quote
 
 
 def _resample_ohlcv(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
@@ -183,3 +227,50 @@ def fetch_price_data(
         requested_symbol=config.symbol,
         resolved_symbol=resolved_symbol,
     )
+
+
+def fetch_live_quote(
+    symbol: str,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> LiveQuote:
+    key = load_api_key(api_key)
+    client = session or requests.Session()
+    resolved_symbol = normalize_symbol(symbol)
+    candidate_urls = [_quote_url(resolved_symbol), _quote_short_url(resolved_symbol), _legacy_quote_url(resolved_symbol)]
+    params: dict[str, str] = {"apikey": key, "symbol": resolved_symbol}
+
+    last_error: Exception | None = None
+    response: requests.Response | None = None
+    payload: Any = None
+    for base_url in candidate_urls:
+        try:
+            request_params = params if "stable" in base_url else {"apikey": key}
+            response = client.get(base_url, params=request_params, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("Error Message"):
+                raise ValueError(payload["Error Message"])
+            quote = _normalize_quote(payload)
+            timestamp = quote.get("timestamp")
+            quote_time = pd.to_datetime(int(timestamp), unit="s", utc=True) if timestamp is not None else None
+            return LiveQuote(
+                symbol=str(quote.get("symbol", resolved_symbol)),
+                price=float(quote["price"]),
+                change=float(quote["change"]) if quote.get("change") is not None else None,
+                change_percentage=float(quote["changePercentage"]) if quote.get("changePercentage") is not None else None,
+                volume=float(quote["volume"]) if quote.get("volume") is not None else None,
+                open=float(quote["open"]) if quote.get("open") is not None else None,
+                previous_close=float(quote["previousClose"]) if quote.get("previousClose") is not None else None,
+                day_low=float(quote["dayLow"]) if quote.get("dayLow") is not None else None,
+                day_high=float(quote["dayHigh"]) if quote.get("dayHigh") is not None else None,
+                market_cap=float(quote["marketCap"]) if quote.get("marketCap") is not None else None,
+                exchange=str(quote["exchange"]) if quote.get("exchange") is not None else None,
+                timestamp=quote_time,
+                source_url=_redact_api_key(response.url) if response else base_url,
+            )
+        except Exception as exc:  # pragma: no cover - exercised via live API fallback
+            last_error = exc
+            response = None
+            payload = None
+    raise ValueError(f"Unable to fetch live quote from Financial Modeling Prep: {last_error}") from last_error

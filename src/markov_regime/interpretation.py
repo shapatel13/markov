@@ -106,6 +106,21 @@ def first_sentence(text: str) -> str:
     return cleaned
 
 
+def _status_label(status: str) -> str:
+    mapping = {
+        "confirmed": "Confirmed",
+        "neutral": "Neutral",
+        "blocked": "Blocked",
+        "unavailable": "Unavailable",
+        "no_primary_signal": "No Primary Signal",
+        "weak_share": "Weak Share",
+        "flat_consensus": "Consensus Flat",
+        "opposed": "Consensus Opposes",
+        "no_primary_signal": "No Primary Signal",
+    }
+    return mapping.get(status, status.replace("_", " ").title())
+
+
 def describe_guardrail(reason: str, *, current_position: int, candidate_action: int) -> str:
     reason_key = reason or "accepted"
     if reason_key == "accepted":
@@ -147,6 +162,67 @@ def describe_guardrail(reason: str, *, current_position: int, candidate_action: 
     if reason_key == "consensus_hold_unavailable":
         return "Consensus diagnostics are unavailable, so new entries are blocked while existing exposure is allowed to continue."
     return f"Latest guardrail status: {reason_key.replace('_', ' ')}."
+
+
+def build_execution_plan(
+    *,
+    latest_row: Mapping[str, Any],
+    interval: Interval,
+    live_price: float | None = None,
+) -> dict[str, str]:
+    current_position = int(latest_row.get("signal_position", 0))
+    candidate_action = int(latest_row.get("candidate_action", 0))
+    guardrail_reason = str(latest_row.get("guardrail_reason", "") or "accepted")
+    latest_close = float(latest_row.get("close", 0.0))
+    latest_high = float(latest_row.get("high", latest_close))
+    latest_low = float(latest_row.get("low", latest_close))
+    signal_time = pd.to_datetime(latest_row.get("timestamp")) if latest_row.get("timestamp") is not None else None
+    reference_price = live_price if live_price is not None else latest_close
+    bar_label = {"1hour": "1H", "4hour": "4H", "1day": "1D"}[interval]
+
+    if current_position == 0 and candidate_action == 1 and guardrail_reason == "accepted":
+        return {
+            "action": "Enter Long",
+            "severity": "success",
+            "summary": f"The latest completed {bar_label} bar qualifies for a fresh long entry.",
+            "entry_guide": (
+                f"Aggressive entry: around {reference_price:,.2f}. "
+                f"Conservative trigger: only if price is still above the last completed {bar_label} high at {latest_high:,.2f}. "
+                f"Invalidate below {latest_low:,.2f}."
+            ),
+            "timing_note": f"This strategy acts on completed {bar_label} bars, so treat intrabar spikes before {signal_time} as noise rather than confirmed signals." if signal_time is not None else f"This strategy acts on completed {bar_label} bars, not intrabar spikes.",
+        }
+    if current_position == 1 and candidate_action == 1 and guardrail_reason == "accepted":
+        return {
+            "action": "Hold Long",
+            "severity": "success",
+            "summary": f"The strategy is already long and the latest completed {bar_label} bar still supports staying long.",
+            "entry_guide": "No fresh entry is needed because the model is already carrying exposure.",
+            "timing_note": f"Only treat a new completed {bar_label} bar as actionable. This is not a tick-by-tick execution model.",
+        }
+    if current_position == 1 and candidate_action == 0:
+        return {
+            "action": "Hold / No Add",
+            "severity": "warning",
+            "summary": f"The model is still carrying a long from earlier, but the latest completed {bar_label} bar does not justify a fresh add.",
+            "entry_guide": "Do not add here. Wait for the next completed bar to restore an accepted long candidate before considering any new entry.",
+            "timing_note": describe_guardrail(guardrail_reason, current_position=current_position, candidate_action=candidate_action),
+        }
+    if current_position == 0 and guardrail_reason == "waiting_for_confirmations":
+        return {
+            "action": "Wait",
+            "severity": "warning",
+            "summary": f"The direction is constructive, but the model still needs more consecutive {bar_label} confirmations before entering.",
+            "entry_guide": f"Wait for another completed {bar_label} bar that keeps the long candidate alive. A conservative reference is the last {bar_label} high at {latest_high:,.2f}.",
+            "timing_note": "This is a confirmation delay, not a missed trade. The filter is trying to reduce one-bar noise.",
+        }
+    return {
+        "action": "No Entry",
+        "severity": "warning",
+        "summary": f"No fresh trade is approved on the latest completed {bar_label} bar.",
+        "entry_guide": "There is no valid live entry level right now because the model prefers staying flat over taking a marginal trade.",
+        "timing_note": describe_guardrail(guardrail_reason, current_position=current_position, candidate_action=candidate_action),
+    }
 
 
 def build_trust_snapshot(
@@ -529,7 +605,7 @@ def build_metric_interpretation_rows(
             5,
             {
                 "metric": "Daily Confirmation",
-                "value": f"{confirmation_status} ({position_label(confirmation_direction)})",
+                "value": f"{_status_label(confirmation_status)} ({position_label(confirmation_direction)})",
                 "interpretation": confirmation_text,
             },
         )
@@ -539,7 +615,7 @@ def build_metric_interpretation_rows(
             insertion_index,
             {
                 "metric": "Consensus Filter",
-                "value": f"{consensus_status} ({position_label(consensus_direction)}, {consensus_share:.0%})",
+                "value": f"{_status_label(consensus_status)} ({position_label(consensus_direction)}, {consensus_share:.0%})",
                 "interpretation": consensus_text,
             },
         )
