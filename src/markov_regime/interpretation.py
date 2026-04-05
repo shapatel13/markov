@@ -792,6 +792,80 @@ def summarize_promotion_gates(gates: pd.DataFrame) -> dict[str, str]:
     }
 
 
+def recommend_strategy_engine(
+    *,
+    strategy_metrics: Mapping[str, float],
+    baseline_comparison: pd.DataFrame,
+    promotion_summary: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    strategy_sharpe = float(strategy_metrics.get("sharpe", 0.0))
+    promotion_verdict = str((promotion_summary or {}).get("verdict", "Unavailable"))
+
+    if baseline_comparison is not None and not baseline_comparison.empty:
+        best_baseline = baseline_comparison.sort_values("sharpe", ascending=False).iloc[0]
+        baseline_name = str(best_baseline.get("baseline", "baseline"))
+        baseline_sharpe = float(best_baseline.get("sharpe", 0.0))
+    else:
+        baseline_name = "unavailable"
+        baseline_sharpe = float("-inf")
+
+    if promotion_verdict == "Eligible" and strategy_sharpe > baseline_sharpe:
+        return {
+            "engine": "hmm",
+            "severity": "success",
+            "headline": "Use HMM, not baseline",
+            "summary": (
+                f"The current HMM run clears the promotion gates and beats the best simple baseline "
+                f"({strategy_sharpe:.2f} vs {baseline_sharpe:.2f})."
+            ),
+            "best_baseline": baseline_name,
+        }
+
+    if promotion_verdict != "Eligible" and baseline_name != "unavailable" and baseline_sharpe > 0.0:
+        return {
+            "engine": "baseline",
+            "severity": "info",
+            "headline": "Use baseline, not HMM",
+            "summary": (
+                f"The HMM is not promoted yet, so the simpler live reference is `{baseline_name}` "
+                f"with Sharpe {baseline_sharpe:.2f}."
+            ),
+            "best_baseline": baseline_name,
+        }
+
+    if baseline_name != "unavailable" and baseline_sharpe >= max(strategy_sharpe, 0.0):
+        return {
+            "engine": "baseline",
+            "severity": "info",
+            "headline": "Use baseline, not HMM",
+            "summary": (
+                f"The best simple baseline `{baseline_name}` is at least as strong "
+                f"on Sharpe ({baseline_sharpe:.2f} vs {strategy_sharpe:.2f})."
+            ),
+            "best_baseline": baseline_name,
+        }
+
+    if promotion_verdict != "Eligible":
+        return {
+            "engine": "cash",
+            "severity": "warning",
+            "headline": "Use no active deployment yet",
+            "summary": (
+                "The HMM is still research-only, and the simple baselines are not compelling enough to justify "
+                "promoting a live default either."
+            ),
+            "best_baseline": baseline_name,
+        }
+
+    return {
+        "engine": "research",
+        "severity": "warning",
+        "headline": "Research further before promotion",
+        "summary": "The current run is promising, but it still needs a cleaner edge over the baseline bar before promotion.",
+        "best_baseline": baseline_name,
+    }
+
+
 def build_control_interpretation_rows(
     *,
     interval: Interval,
