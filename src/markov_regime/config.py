@@ -5,6 +5,7 @@ from typing import Literal
 
 Interval = Literal["1hour", "4hour", "1day"]
 ConsensusGateMode = Literal["hard", "entry_only"]
+HistoricalProvider = Literal["auto", "fmp", "coinbase", "yahoo"]
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class DataConfig:
     limit: int = 2500
     start: str | None = None
     end: str | None = None
+    provider: HistoricalProvider = "auto"
 
 
 @dataclass(frozen=True)

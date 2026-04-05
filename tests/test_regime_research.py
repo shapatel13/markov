@@ -20,7 +20,7 @@ from markov_regime.consensus import (
 )
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
-from markov_regime.data import fetch_live_quote, normalize_symbol
+from markov_regime.data import fetch_live_quote, fetch_price_data, normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
@@ -102,12 +102,96 @@ class _FakeSession:
     def __init__(self, responses: dict[str, _FakeResponse]) -> None:
         self.responses = responses
 
-    def get(self, url: str, params: dict[str, str] | None = None, timeout: int | None = None) -> _FakeResponse:
+    def get(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        timeout: int | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> _FakeResponse:
         _ = timeout
+        _ = headers
         if url in self.responses:
             return self.responses[url]
         rendered = f"{url}?{urlencode(params or {})}"
         return _FakeResponse(rendered, [], status_code=404)
+
+
+def _fmp_hourly_payload(periods: int, start: str = "2025-01-01 00:00:00") -> list[dict[str, object]]:
+    timestamps = pd.date_range(start, periods=periods, freq="h")
+    payload: list[dict[str, object]] = []
+    for index, timestamp in enumerate(timestamps):
+        base = 100.0 + index
+        payload.append(
+            {
+                "date": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": base,
+                "high": base + 1.0,
+                "low": base - 1.0,
+                "close": base + 0.5,
+                "volume": 1_000.0 + index,
+            }
+        )
+    return payload
+
+
+def _yahoo_chart_payload(periods: int, start: str = "2025-01-01 00:00:00", *, include_partial: bool = False) -> dict[str, object]:
+    timestamps = pd.date_range(start, periods=periods, freq="h", tz="UTC")
+    if include_partial:
+        timestamps = timestamps.append(pd.DatetimeIndex([timestamps[-1] + pd.Timedelta(minutes=16)]))
+
+    opens = []
+    highs = []
+    lows = []
+    closes = []
+    volumes = []
+    for index, _timestamp in enumerate(timestamps):
+        base = 200.0 + index
+        opens.append(base)
+        highs.append(base + 1.0)
+        lows.append(base - 1.0)
+        closes.append(base + 0.5)
+        volumes.append(2_000.0 + index)
+
+    return {
+        "chart": {
+            "result": [
+                {
+                    "timestamp": [int(item.timestamp()) for item in timestamps],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": opens,
+                                "high": highs,
+                                "low": lows,
+                                "close": closes,
+                                "volume": volumes,
+                            }
+                        ]
+                    },
+                }
+            ],
+            "error": None,
+        }
+    }
+
+
+def _coinbase_payload(periods: int, start: str = "2025-01-01 00:00:00") -> list[list[float]]:
+    timestamps = pd.date_range(start, periods=periods, freq="h", tz="UTC")
+    payload: list[list[float]] = []
+    for index, timestamp in enumerate(timestamps):
+        base = 300.0 + index
+        payload.append(
+            [
+                float(int(timestamp.timestamp())),
+                base - 1.0,
+                base + 1.0,
+                base,
+                base + 0.5,
+                3_000.0 + index,
+            ]
+        )
+    return payload
 
 
 def _consensus_comparison_fixture() -> tuple[WalkForwardResult, ConsensusDiagnostics]:
@@ -188,6 +272,7 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
         "regime_mix_v2",
         "trend_context",
         "regime_context",
+        "atr_causal",
     }.issubset(set(list_feature_packs()))
 
     trend_columns = get_feature_columns("trend")
@@ -202,6 +287,8 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
     trend_context_frame = build_feature_frame(synthetic_prices, feature_columns=trend_context_columns)
     regime_context_columns = get_feature_columns("regime_context")
     regime_context_frame = build_feature_frame(synthetic_prices, feature_columns=regime_context_columns)
+    atr_causal_columns = get_feature_columns("atr_causal")
+    atr_causal_frame = build_feature_frame(synthetic_prices, feature_columns=atr_causal_columns)
 
     assert "ema_gap_24" in trend_columns
     assert "adx_14" in trend_strength_columns
@@ -209,12 +296,14 @@ def test_feature_packs_are_available_and_buildable(synthetic_prices: pd.DataFram
     assert "parkinson_vol_24" in vol_surface_columns
     assert "daily_trend_20" in trend_context_columns
     assert "daily_adx_14" in regime_context_columns
+    assert "atr_momentum_24" in atr_causal_columns
     assert trend_frame.loc[:, list(trend_columns)].isna().sum().sum() == 0
     assert trend_strength_frame.loc[:, list(trend_strength_columns)].isna().sum().sum() == 0
     assert mean_reversion_frame.loc[:, list(mean_reversion_columns)].isna().sum().sum() == 0
     assert vol_surface_frame.loc[:, list(vol_surface_columns)].isna().sum().sum() == 0
     assert trend_context_frame.loc[:, list(trend_context_columns)].isna().sum().sum() == 0
     assert regime_context_frame.loc[:, list(regime_context_columns)].isna().sum().sum() == 0
+    assert atr_causal_frame.loc[:, list(atr_causal_columns)].isna().sum().sum() == 0
 
 
 def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.DataFrame) -> None:
@@ -241,6 +330,9 @@ def test_advanced_feature_columns_are_present_and_finite(synthetic_prices: pd.Da
         "daily_adx_14",
         "daily_di_spread_14",
         "daily_range_ratio_10",
+        "atr_momentum_24",
+        "causal_gap_24",
+        "causal_slope_24",
     )
     frame = build_feature_frame(synthetic_prices, feature_columns=advanced_columns)
 
@@ -258,6 +350,95 @@ def test_redact_api_key_hides_secret_in_source_url() -> None:
     redacted = _redact_api_key("https://example.com/path?apikey=supersecret&symbol=BTCUSD")
     assert "supersecret" not in redacted
     assert "apikey=%2A%2A%2A" in redacted
+
+
+def test_fetch_price_data_auto_falls_back_to_yahoo_for_thin_intraday_crypto() -> None:
+    fmp_response = _FakeResponse(
+        "https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=BTCUSD&apikey=%2A%2A%2A",
+        _fmp_hourly_payload(600),
+    )
+    yahoo_response = _FakeResponse(
+        "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1h&range=730d",
+        _yahoo_chart_payload(1200),
+    )
+    session = _FakeSession(
+        {
+            "https://financialmodelingprep.com/stable/historical-chart/1hour": fmp_response,
+            "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD": yahoo_response,
+        }
+    )
+
+    result = fetch_price_data(
+        DataConfig(symbol="BTCUSD", interval="4hour", limit=200, provider="auto"),
+        api_key="test-key",
+        session=session,
+    )
+
+    assert result.provider == "yahoo"
+    assert len(result.frame) == 200
+    assert result.provider_note is not None
+    assert "too thin" in result.provider_note
+    assert "query1.finance.yahoo.com" in result.source_url
+
+
+def test_fetch_price_data_respects_explicit_fmp_provider() -> None:
+    fmp_response = _FakeResponse(
+        "https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=BTCUSD&apikey=%2A%2A%2A",
+        _fmp_hourly_payload(600),
+    )
+    session = _FakeSession({"https://financialmodelingprep.com/stable/historical-chart/1hour": fmp_response})
+
+    result = fetch_price_data(
+        DataConfig(symbol="BTCUSD", interval="4hour", limit=200, provider="fmp"),
+        api_key="test-key",
+        session=session,
+    )
+
+    assert result.provider == "fmp"
+    assert len(result.frame) == 149
+    assert result.provider_note is None
+
+
+def test_fetch_price_data_yahoo_drops_partial_intraday_bar() -> None:
+    yahoo_response = _FakeResponse(
+        "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1h&range=730d",
+        _yahoo_chart_payload(12, include_partial=True),
+    )
+    session = _FakeSession({"https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD": yahoo_response})
+
+    result = fetch_price_data(
+        DataConfig(symbol="BTCUSD", interval="1hour", limit=20, provider="yahoo"),
+        session=session,
+    )
+
+    assert result.provider == "yahoo"
+    assert len(result.frame) == 12
+    assert bool(result.frame["timestamp"].dt.minute.eq(0).all())
+
+
+def test_fetch_price_data_coinbase_provider_parses_hourly_crypto_payload() -> None:
+    coinbase_response = _FakeResponse(
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600",
+        _coinbase_payload(10),
+    )
+    session = _FakeSession({"https://api.exchange.coinbase.com/products/BTC-USD/candles": coinbase_response})
+
+    result = fetch_price_data(
+        DataConfig(
+            symbol="BTCUSD",
+            interval="1hour",
+            limit=10,
+            provider="coinbase",
+            start="2025-01-01 00:00:00",
+            end="2025-01-01 09:00:00",
+        ),
+        session=session,
+    )
+
+    assert result.provider == "coinbase"
+    assert len(result.frame) == 10
+    assert float(result.frame.iloc[0]["open"]) == 300.0
+    assert "api.exchange.coinbase.com" in result.source_url
 
 
 def test_resample_ohlcv_builds_complete_4hour_bars_and_drops_partial() -> None:
@@ -884,6 +1065,8 @@ def test_write_primetime_audit_report_writes_json_and_markdown(tmp_path: Path) -
         resolved_symbol="BTCUSD",
         interval="4hour",
         feature_pack="trend",
+        historical_provider="yahoo",
+        historical_provider_note="Auto-selected Yahoo Finance long-history bars because the FMP intraday sample was too thin.",
         raw_rows=600,
         usable_rows=512,
         walk_adjusted=True,

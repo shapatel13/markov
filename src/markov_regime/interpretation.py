@@ -10,8 +10,9 @@ POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
     "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline. Defaults now lean toward a 12-month train and 3-month blind test style on the higher timeframes.",
+    "provider": "Historical bar source. `auto` keeps Financial Modeling Prep where possible, but falls back to Coinbase long-history crypto candles, then Yahoo if needed, when FMP's recent-bar cap would starve the walk-forward test.",
     "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
-    "limit": "How many vendor bars to fetch. More history usually makes walk-forward conclusions less fragile.",
+    "limit": "How many bars to keep after fetching and resampling. More history usually makes walk-forward conclusions less fragile, and `auto` provider mode may reach beyond FMP's recent intraday cap when needed.",
     "states": "Number of HMM regimes. Too few can blur distinct behavior; too many can over-segment noise.",
     "train_bars": "Bars used to fit each rolling HMM. Larger windows are steadier but slower to adapt.",
     "purge_bars": "Bars removed between train and validate windows to reduce leakage around the split.",
@@ -797,6 +798,7 @@ def build_control_interpretation_rows(
     feature_pack: str,
     walk_config: WalkForwardConfig,
     strategy_config: StrategyConfig,
+    history_provider: str | None = None,
 ) -> pd.DataFrame:
     total_friction = strategy_config.cost_bps + strategy_config.spread_bps + strategy_config.slippage_bps + strategy_config.impact_bps
 
@@ -856,6 +858,15 @@ def build_control_interpretation_rows(
             "control": "Interval",
             "value": interval,
             "interpretation": interval_text,
+        },
+        {
+            "control": "Historical Provider",
+            "value": history_provider or "n/a",
+            "interpretation": (
+                "Auto mode keeps Financial Modeling Prep for recent data when possible and switches to a deeper crypto history source only when the intraday sample would otherwise be too thin."
+                if history_provider == "auto"
+                else "The selected provider controls the historical bar source for the research run. Keep it fixed during comparisons so source changes do not masquerade as alpha."
+            ),
         },
         {
             "control": "Feature Pack",

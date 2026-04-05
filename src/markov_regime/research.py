@@ -11,6 +11,7 @@ import pandas as pd
 
 from markov_regime.config import (
     DataConfig,
+    HistoricalProvider,
     Interval,
     ModelConfig,
     StrategyConfig,
@@ -195,14 +196,15 @@ def _fetch_feature_context(
     interval: Interval,
     feature_columns: tuple[str, ...],
     limit: int,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+    history_provider: HistoricalProvider,
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
 ) -> tuple[DataFetchResult, pd.DataFrame]:
-    key = (symbol, interval, limit, feature_columns)
+    key = (symbol, interval, limit, history_provider, feature_columns)
     cached = cache.get(key)
     if cached is not None:
         return cached
 
-    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
+    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit, provider=history_provider))
     feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
     cache[key] = (fetched, feature_frame)
     return fetched, feature_frame
@@ -224,11 +226,12 @@ def _maybe_apply_daily_confirmation(
     result,
     symbol: str,
     limit: int,
+    history_provider: HistoricalProvider,
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
     interval: Interval,
 ):
     if interval != "4hour" or not strategy_config.require_daily_confirmation:
@@ -240,6 +243,7 @@ def _maybe_apply_daily_confirmation(
         interval="1day",
         feature_columns=feature_columns,
         limit=limit,
+        history_provider=history_provider,
         cache=cache,
     )
     confirmation_walk_config, _ = _resolve_walk_config(confirmation_features, "1day", auto_adjust_windows)
@@ -393,6 +397,7 @@ def run_timeframe_comparison(
     *,
     symbol: str,
     limit: int,
+    history_provider: HistoricalProvider = "auto",
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
     feature_pack: str = "baseline",
@@ -401,7 +406,7 @@ def run_timeframe_comparison(
     intervals: tuple[Interval, ...] = DEFAULT_RESEARCH_INTERVALS,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
 
     for interval in intervals:
         try:
@@ -410,6 +415,7 @@ def run_timeframe_comparison(
                 interval=interval,
                 feature_columns=feature_columns,
                 limit=limit,
+                history_provider=history_provider,
                 cache=cache,
             )
             walk_config, was_adjusted = _resolve_walk_config(feature_frame, interval, auto_adjust_windows)
@@ -425,6 +431,7 @@ def run_timeframe_comparison(
                 result=result,
                 symbol=symbol,
                 limit=limit,
+                history_provider=history_provider,
                 feature_columns=feature_columns,
                 model_config=model_config,
                 strategy_config=strategy_config,
@@ -484,12 +491,13 @@ def run_feature_pack_comparison(
     strategy_config: StrategyConfig,
     symbol: str | None = None,
     limit: int | None = None,
+    history_provider: HistoricalProvider = "auto",
     feature_packs: tuple[str, ...] | None = None,
     auto_adjust_windows: bool = True,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     selected_packs = feature_packs or list_feature_packs()
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
 
     for feature_pack in selected_packs:
         feature_columns = get_feature_columns(feature_pack)
@@ -509,6 +517,7 @@ def run_feature_pack_comparison(
                     result=result,
                     symbol=symbol,
                     limit=limit,
+                    history_provider=history_provider,
                     feature_columns=feature_columns,
                     model_config=model_config,
                     strategy_config=strategy_config,
@@ -741,7 +750,7 @@ def run_autoresearch(
     results_path: str | Path = "results.tsv",
 ) -> pd.DataFrame:
     ensure_results_tsv(results_path)
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
     rows: list[dict[str, object]] = []
     contexts: dict[str, dict[str, object]] = {}
     created_at = pd.Timestamp.utcnow()
@@ -756,6 +765,7 @@ def run_autoresearch(
                 interval=interval,
                 feature_columns=candidate_feature_columns,
                 limit=program.limit,
+                history_provider="auto",
                 cache=cache,
             )
             walk_config, was_adjusted = _resolve_walk_config(feature_frame, interval, program.auto_adjust_windows)
@@ -784,6 +794,7 @@ def run_autoresearch(
                         interval=interval,
                         feature_columns=candidate_feature_columns,
                         limit=program.limit,
+                        history_provider="auto",
                         cache=cache,
                     )
                     robust_walk_config, _ = _resolve_walk_config(robust_features, interval, program.auto_adjust_windows)

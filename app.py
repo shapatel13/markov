@@ -100,23 +100,24 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("FMP-backed BTC 4H preset with blind out-of-sample walk-forward diagnostics, explicit guardrails, and conservative research framing.")
+st.caption("FMP live-quote workflow with auto-backed long-history crypto research, blind out-of-sample walk-forward diagnostics, explicit guardrails, and conservative research framing.")
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC 4H `trend` research with daily confirmation. If consensus is enabled, the recommended gate mode is `entry_only`.")
+    st.caption("Default preset: BTC 4H `mean_reversion`, 8 states, auto history provider. The daily lane remains available as context, but it is not a hard veto by default.")
     feature_pack_options = list(list_feature_packs())
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
+    history_provider = st.selectbox("Historical provider", options=["auto", "fmp", "coinbase", "yahoo"], index=0, help=CONTROL_HELP["provider"])
     default_walk = default_walk_forward_config(interval)
     feature_pack = st.selectbox(
         "Feature pack",
         options=feature_pack_options,
-        index=feature_pack_options.index("trend") if "trend" in feature_pack_options else 0,
+        index=feature_pack_options.index("mean_reversion") if "mean_reversion" in feature_pack_options else 0,
         help=CONTROL_HELP["feature_pack"],
     )
     limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100, help=CONTROL_HELP["limit"])
-    selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=6, help=CONTROL_HELP["states"])
+    selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=8, help=CONTROL_HELP["states"])
     train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12, help=CONTROL_HELP["train_bars"])
     purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=default_walk.purge_bars, step=1, help=CONTROL_HELP["purge_bars"])
     validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, value=default_walk.validate_bars, step=12, help=CONTROL_HELP["validate_bars"])
@@ -129,7 +130,7 @@ with st.sidebar.form("controls"):
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     allow_short = st.checkbox("Allow short trades", value=False, help=CONTROL_HELP["allow_short"])
-    require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=True, help=CONTROL_HELP["require_daily_confirmation"])
+    require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=False, help=CONTROL_HELP["require_daily_confirmation"])
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
     consensus_gate_mode = st.selectbox(
         "Consensus gate mode",
@@ -157,7 +158,7 @@ if refresh_live_quote:
 if run_clicked:
     try:
         with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
-            data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit))
+            data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit), provider=history_provider)
             model_config = ModelConfig(n_states=selected_states)
             feature_columns = get_feature_columns(feature_pack)
             requested_walk_config = WalkForwardConfig(
@@ -204,7 +205,7 @@ if run_clicked:
             confirmation_fetched = None
             confirmation_result = None
             if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
-                confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=int(limit))
+                confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=int(limit), provider=history_provider)
                 confirmation_fetched = fetch_price_data(confirmation_data_config)
                 confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
                 confirmation_walk_config, _ = (
@@ -244,6 +245,7 @@ if run_clicked:
                 symbols=parse_symbol_list(robustness_symbols),
                 interval=data_config.interval,
                 limit=int(limit),
+                history_provider=history_provider,
                 feature_columns=feature_columns,
                 model_config=model_config,
                 walk_config=walk_config,
@@ -254,6 +256,7 @@ if run_clicked:
                 run_timeframe_comparison(
                     symbol=symbol,
                     limit=int(limit),
+                    history_provider=history_provider,
                     model_config=model_config,
                     strategy_config=execution_strategy_config,
                     feature_pack=feature_pack,
@@ -271,6 +274,7 @@ if run_clicked:
                     strategy_config=execution_strategy_config,
                     symbol=symbol,
                     limit=int(limit),
+                    history_provider=history_provider,
                     auto_adjust_windows=auto_adjust_windows,
                 )
                 if run_feature_pack_check
@@ -282,6 +286,7 @@ if run_clicked:
                     symbol=symbol,
                     interval=data_config.interval,
                     limit=int(limit),
+                    history_provider=history_provider,
                     feature_columns=feature_columns,
                     model_config=model_config,
                     strategy_config=execution_strategy_config,
@@ -343,6 +348,8 @@ if run_clicked:
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
+                "data_provider": fetched.provider,
+                "data_provider_note": fetched.provider_note,
                 "comparison": comparison,
                 "selected_result": selected_result,
                 "sweep_results": sweep_results,
@@ -357,6 +364,7 @@ if run_clicked:
                 "confirmation_summary": selected_result.confirmation_summary,
                 "confirmation_result": confirmation_result,
                 "confirmation_data_url": confirmation_fetched.source_url if confirmation_fetched is not None else "",
+                "confirmation_data_provider": confirmation_fetched.provider if confirmation_fetched is not None else "",
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
@@ -384,7 +392,7 @@ if run_clicked:
         st.error(str(exc))
         st.info(
             "Try a larger history, a higher timeframe like `4hour` or `1day`, or enable automatic window sizing. "
-            "For crypto, use `BTCUSD` rather than `BTC` so FMP returns the full series."
+            "For crypto, prefer the `auto` historical provider so the app can backfill beyond vendor intraday caps."
         )
         st.stop()
 
@@ -431,6 +439,7 @@ control_interpretation = build_control_interpretation_rows(
     feature_pack=analysis["feature_pack"],
     walk_config=analysis["walk_config"],
     strategy_config=analysis["strategy_config"],
+    history_provider=analysis["data_config"].provider,
 )
 promotion_gates = build_promotion_gate_rows(
     metrics=selected_result.metrics,
@@ -511,9 +520,15 @@ if analysis["strategy_config"].require_consensus_confirmation:
 if analysis["strategy_config"].allow_short:
     st.caption("Shorts are enabled, so bearish validated regimes can surface as `Enter Short` or `Hold Short` instead of only flattening exposure.")
 st.caption("Headline metrics are stitched only from blind test windows. Training and validation slices are excluded from performance totals.")
-st.caption(f"Latest guardrail status: `{guardrail_text}` | Data provider: `Financial Modeling Prep` | Data request: `{analysis['data_url']}`")
+st.caption(
+    f"Latest guardrail status: `{guardrail_text}` | Historical provider: `{analysis.get('data_provider', 'n/a')}` | Data request: `{analysis['data_url']}`"
+)
+if analysis.get("data_provider_note"):
+    st.info(f"Historical provider note: {analysis['data_provider_note']}")
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
-    st.caption(f"Daily confirmation source: `{analysis['confirmation_data_url']}`")
+    st.caption(
+        f"Daily confirmation source: `{analysis['confirmation_data_url']}` | Provider: `{analysis.get('confirmation_data_provider') or 'n/a'}`"
+    )
 st.caption(f"Feature pack: `{analysis['feature_pack']}`")
 if analysis.get("resolved_symbol") and analysis["resolved_symbol"] != analysis["symbol"]:
     st.info(
@@ -642,9 +657,13 @@ with methodology_tab:
     methodology_rows = pd.DataFrame(
         [
             {
-                "component": "Data Provider",
-                "value": "Financial Modeling Prep",
-                "interpretation": "Current app default. Keep the provider fixed during a run so data-source changes do not masquerade as strategy improvements.",
+                "component": "Historical Provider",
+                "value": str(analysis.get("data_provider", "n/a")).upper(),
+                "interpretation": (
+                    str(analysis.get("data_provider_note"))
+                    if analysis.get("data_provider_note")
+                    else "Current run used the requested historical provider without auto-backfill."
+                ),
             },
             {
                 "component": "Performance Stitching",

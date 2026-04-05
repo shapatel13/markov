@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.signal import lfilter
 
 FORWARD_HORIZONS: tuple[int, ...] = (1, 3, 6, 12, 24, 72)
 
@@ -145,6 +146,18 @@ FEATURE_PACKS: dict[str, tuple[str, ...]] = {
         "daily_range_ratio_10",
         "volume_z_24",
     ),
+    "atr_causal": (
+        "atr_momentum_6",
+        "atr_momentum_24",
+        "atr_momentum_72",
+        "causal_gap_12",
+        "causal_gap_24",
+        "causal_slope_12",
+        "causal_slope_24",
+        "range_ratio",
+        "vol_24",
+        "volume_z_24",
+    ),
 }
 
 FEATURE_COLUMNS: tuple[str, ...] = FEATURE_PACKS["baseline"]
@@ -179,6 +192,10 @@ def _compute_true_range(frame: pd.DataFrame) -> pd.Series:
         axis=1,
     )
     return components.max(axis=1)
+
+
+def _compute_atr(frame: pd.DataFrame, window: int = 14) -> pd.Series:
+    return _compute_true_range(frame).rolling(window).mean()
 
 
 def _wilder_smooth(series: pd.Series, window: int) -> pd.Series:
@@ -252,6 +269,17 @@ def _compute_garman_klass_volatility(frame: pd.DataFrame, window: int = 24) -> p
     return np.sqrt(estimator.clip(lower=0.0))
 
 
+def _causal_lowpass(series: pd.Series, span: int, poles: int = 3) -> pd.Series:
+    alpha = 2.0 / (span + 1.0)
+    values = series.ffill().bfill().astype(float).to_numpy()
+    filtered = values
+    numerator = [alpha]
+    denominator = [1.0, -(1.0 - alpha)]
+    for _ in range(max(poles, 1)):
+        filtered = lfilter(numerator, denominator, filtered)
+    return pd.Series(filtered, index=series.index, dtype="float64")
+
+
 def _is_intraday(frame: pd.DataFrame) -> bool:
     deltas = frame["timestamp"].sort_values().diff().dropna()
     if deltas.empty:
@@ -306,13 +334,24 @@ def build_feature_frame(
     frame["trend_gap_12_24"] = frame["trend_12"] - frame["trend_24"]
     frame["vol_12"] = log_return_1.rolling(12).std()
     frame["vol_24"] = log_return_1.rolling(24).std()
+    atr_14 = _compute_atr(frame, 14)
     downside_returns = log_return_1.where(log_return_1 < 0.0, 0.0)
     frame["downside_vol_24"] = downside_returns.rolling(24).std()
     frame["vol_ratio_12_24"] = frame["vol_12"] / frame["vol_24"].replace(0.0, np.nan)
     frame["range_ratio"] = (frame["high"] - frame["low"]) / frame["close"].replace(0.0, np.nan)
-    frame["atr_ratio_14"] = _compute_true_range(frame).rolling(14).mean() / frame["close"].replace(0.0, np.nan)
+    frame["atr_ratio_14"] = atr_14 / frame["close"].replace(0.0, np.nan)
     frame["ema_gap_12"] = frame["close"] / frame["close"].ewm(span=12, adjust=False).mean() - 1.0
     frame["ema_gap_24"] = frame["close"] / frame["close"].ewm(span=24, adjust=False).mean() - 1.0
+    atr_scale = atr_14.replace(0.0, np.nan)
+    frame["atr_momentum_6"] = frame["close"].diff(6) / atr_scale
+    frame["atr_momentum_24"] = frame["close"].diff(24) / atr_scale
+    frame["atr_momentum_72"] = frame["close"].diff(72) / atr_scale
+    causal_12 = _causal_lowpass(frame["close"], span=12, poles=3)
+    causal_24 = _causal_lowpass(frame["close"], span=24, poles=3)
+    frame["causal_gap_12"] = frame["close"] / causal_12.replace(0.0, np.nan) - 1.0
+    frame["causal_gap_24"] = frame["close"] / causal_24.replace(0.0, np.nan) - 1.0
+    frame["causal_slope_12"] = causal_12.diff(6) / atr_scale
+    frame["causal_slope_24"] = causal_24.diff(12) / atr_scale
     frame["compression_24"] = frame["range_ratio"].rolling(24).mean() / frame["vol_24"].replace(0.0, np.nan)
     frame["return_z_24"] = _rolling_zscore(log_return_1, 24)
     frame["volume_z_24"] = _rolling_zscore(frame["volume"].replace(0.0, np.nan), 24).fillna(0.0)

@@ -7,7 +7,7 @@ import pandas as pd
 
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.baselines import summarize_baselines
-from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, default_walk_forward_config
+from markov_regime.config import DataConfig, HistoricalProvider, Interval, ModelConfig, StrategyConfig, default_walk_forward_config
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import DataFetchResult, fetch_price_data
 from markov_regime.features import build_feature_frame
@@ -46,16 +46,17 @@ def _resolve_feature_context(
     symbol: str,
     interval: Interval,
     limit: int,
+    history_provider: HistoricalProvider,
     feature_columns: tuple[str, ...],
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
 ) -> tuple[DataFetchResult, pd.DataFrame, object, bool]:
-    key = (symbol, interval, limit, feature_columns)
+    key = (symbol, interval, limit, history_provider, feature_columns)
     cached = cache.get(key)
     if cached is not None:
         return cached
 
-    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit))
+    fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit, provider=history_provider))
     feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
     walk_config, was_adjusted = (
         suggest_walk_forward_config(len(feature_frame), default_walk_forward_config(interval))
@@ -71,16 +72,18 @@ def _run_member(
     symbol: str,
     interval: Interval,
     limit: int,
+    history_provider: HistoricalProvider,
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
     auto_adjust_windows: bool,
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]],
 ) -> tuple[WalkForwardResult, DataFetchResult, bool]:
     fetched, feature_frame, walk_config, was_adjusted = _resolve_feature_context(
         symbol=symbol,
         interval=interval,
         limit=limit,
+        history_provider=history_provider,
         feature_columns=feature_columns,
         auto_adjust_windows=auto_adjust_windows,
         cache=cache,
@@ -100,6 +103,7 @@ def _run_member(
             symbol=symbol,
             interval="1day",
             limit=limit,
+            history_provider=history_provider,
             feature_columns=feature_columns,
             auto_adjust_windows=auto_adjust_windows,
             cache=cache,
@@ -547,6 +551,7 @@ def run_consensus_diagnostics(
     symbol: str,
     interval: Interval,
     limit: int,
+    history_provider: HistoricalProvider = "auto",
     feature_columns: tuple[str, ...],
     model_config: ModelConfig,
     strategy_config: StrategyConfig,
@@ -556,7 +561,7 @@ def run_consensus_diagnostics(
 ) -> ConsensusDiagnostics:
     seeds = seed_values or _default_seed_values(model_config.random_state)
     states = state_counts or _default_state_counts(model_config.n_states)
-    cache: dict[tuple[str, Interval, int, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]] = {}
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame, object, bool]] = {}
     member_rows: list[dict[str, object]] = []
     member_predictions: dict[str, pd.DataFrame] = {}
 
@@ -567,6 +572,7 @@ def run_consensus_diagnostics(
                 symbol=symbol,
                 interval=interval,
                 limit=limit,
+                history_provider=history_provider,
                 feature_columns=feature_columns,
                 model_config=member_model_config,
                 strategy_config=strategy_config,
