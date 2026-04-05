@@ -19,9 +19,11 @@ from markov_regime.readiness import DEFAULT_AUDIT_STRATEGY, run_primetime_audit,
 from markov_regime.research import (
     ensure_results_tsv,
     load_research_program,
+    run_candidate_search,
     run_autoresearch,
     run_feature_pack_comparison,
     run_timeframe_comparison,
+    summarize_candidate_search,
     write_research_program,
 )
 from markov_regime.reporting import export_signal_report
@@ -30,6 +32,27 @@ from markov_regime.strategy import parameter_sweep
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
 DEFAULT_CLI_INTERVAL = "4hour"
+
+
+def _parse_csv_strings(values: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in values.split(",") if item.strip())
+
+
+def _parse_csv_ints(values: str) -> tuple[int, ...]:
+    return tuple(int(item.strip()) for item in values.split(",") if item.strip())
+
+
+def _parse_short_modes(values: str) -> tuple[bool, ...]:
+    parsed: list[bool] = []
+    mapping = {"on": True, "off": False, "true": True, "false": False, "long_only": False, "long_short": True}
+    for item in values.split(","):
+        key = item.strip().lower()
+        if not key:
+            continue
+        if key not in mapping:
+            raise ValueError(f"Unsupported short mode: {item}")
+        parsed.append(mapping[key])
+    return tuple(parsed)
 
 
 def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
@@ -177,6 +200,32 @@ def main() -> None:
     consensus_parser = subparsers.add_parser("consensus", help="Run nearby-state and multi-seed consensus diagnostics")
     _common_parser(consensus_parser)
 
+    candidate_parser = subparsers.add_parser(
+        "candidate-search",
+        help="Rank feature pack, state count, shorting mode, and confirmation mode on deeper history",
+    )
+    candidate_parser.add_argument("--symbol", default="BTCUSD")
+    candidate_parser.add_argument("--interval", choices=["4hour", "1day", "1hour"], default=DEFAULT_CLI_INTERVAL)
+    candidate_parser.add_argument("--provider", choices=["auto", "fmp", "coinbase", "yahoo"], default="coinbase")
+    candidate_parser.add_argument("--limit", type=int, default=5000)
+    candidate_parser.add_argument("--feature-packs", default="mean_reversion,trend,baseline,regime_mix,atr_causal,trend_context")
+    candidate_parser.add_argument("--state-counts", default="5,6,7,8,9")
+    candidate_parser.add_argument("--short-modes", default="off,on")
+    candidate_parser.add_argument("--confirmation-modes", default="off,daily,consensus_entry,daily_consensus_entry")
+    candidate_parser.add_argument("--max-candidates", type=int, default=32)
+    candidate_parser.add_argument("--robustness-top-k", type=int, default=2)
+    candidate_parser.add_argument("--robustness-symbols", default="BTCUSD,ETHUSD,SOLUSD")
+    candidate_parser.add_argument("--posterior-threshold", type=float, default=0.7)
+    candidate_parser.add_argument("--min-hold-bars", type=int, default=6)
+    candidate_parser.add_argument("--cooldown-bars", type=int, default=4)
+    candidate_parser.add_argument("--required-confirmations", type=int, default=2)
+    candidate_parser.add_argument("--confidence-gap", type=float, default=0.06)
+    candidate_parser.add_argument("--cost-bps", type=float, default=10.0)
+    candidate_parser.add_argument("--spread-bps", type=float, default=4.0)
+    candidate_parser.add_argument("--slippage-bps", type=float, default=3.0)
+    candidate_parser.add_argument("--impact-bps", type=float, default=2.0)
+    candidate_parser.add_argument("--strict-windows", action="store_true")
+
     readiness_parser = subparsers.add_parser("readiness-audit", help="Run operational and strategy primetime readiness checks")
     _common_parser(readiness_parser)
     readiness_parser.add_argument("--robustness-symbols", default="BTCUSD,ETHUSD,SOLUSD")
@@ -204,6 +253,41 @@ def main() -> None:
         program = load_research_program(args.program)
         leaderboard = run_autoresearch(program=program, results_path=args.results)
         print(leaderboard.head(10).to_string(index=False))
+        return
+
+    if args.command == "candidate-search":
+        search_strategy = StrategyConfig(
+            posterior_threshold=args.posterior_threshold,
+            min_hold_bars=args.min_hold_bars,
+            cooldown_bars=args.cooldown_bars,
+            required_confirmations=args.required_confirmations,
+            confidence_gap=args.confidence_gap,
+            cost_bps=args.cost_bps,
+            spread_bps=args.spread_bps,
+            slippage_bps=args.slippage_bps,
+            impact_bps=args.impact_bps,
+        )
+        leaderboard = run_candidate_search(
+            symbol=args.symbol,
+            interval=args.interval,
+            limit=args.limit,
+            history_provider=args.provider,
+            base_model_config=ModelConfig(),
+            base_strategy_config=search_strategy,
+            feature_packs=_parse_csv_strings(args.feature_packs),
+            state_counts=_parse_csv_ints(args.state_counts),
+            short_modes=_parse_short_modes(args.short_modes),
+            confirmation_modes=_parse_csv_strings(args.confirmation_modes),
+            robustness_symbols=tuple(parse_symbol_list(args.robustness_symbols)),
+            auto_adjust_windows=not args.strict_windows,
+            max_candidates=args.max_candidates,
+            robustness_top_k=args.robustness_top_k,
+        )
+        summary = summarize_candidate_search(leaderboard)
+        print(summary["headline"])
+        print(summary["summary"])
+        print()
+        print(leaderboard.head(15).to_string(index=False))
         return
 
     if args.command == "readiness-audit":

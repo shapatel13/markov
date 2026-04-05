@@ -20,11 +20,13 @@ from markov_regime.config import (
     default_walk_forward_config,
 )
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.consensus import apply_consensus_confirmation, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import DataFetchResult, fetch_price_data
 from markov_regime.features import FEATURE_COLUMNS, build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.interpretation import build_promotion_gate_rows, recommend_strategy_engine, summarize_promotion_gates
 from markov_regime.research_notes import build_research_notes
-from markov_regime.robustness import parse_symbol_list
+from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
 from markov_regime.strategy import parameter_sweep, replay_strategy
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
@@ -75,6 +77,36 @@ RESULT_COLUMNS: tuple[str, ...] = (
 
 DEFAULT_RESEARCH_INTERVALS: tuple[Interval, ...] = ("4hour", "1day", "1hour")
 INTERVAL_PRIORITY: dict[Interval, int] = {"4hour": 0, "1day": 1, "1hour": 2}
+CANDIDATE_CONFIRMATION_MODES: tuple[str, ...] = ("off", "daily", "consensus_entry", "daily_consensus_entry")
+CANDIDATE_SEARCH_COLUMNS: tuple[str, ...] = (
+    "rank",
+    "symbol",
+    "interval",
+    "provider",
+    "feature_pack",
+    "n_states",
+    "shorting_mode",
+    "confirmation_mode",
+    "usable_rows",
+    "walk_adjusted",
+    "sharpe",
+    "bootstrap_sharpe_lower",
+    "annualized_return",
+    "max_drawdown",
+    "trades",
+    "stability_score",
+    "outer_holdout_sharpe",
+    "robustness_median_sharpe",
+    "robustness_evaluated",
+    "best_baseline",
+    "best_baseline_sharpe",
+    "promotion_verdict",
+    "engine_recommendation",
+    "recommendation_detail",
+    "candidate_score",
+    "candidate_status",
+    "notes",
+)
 
 
 @dataclass(frozen=True)
@@ -264,6 +296,130 @@ def _maybe_apply_daily_confirmation(
     )
 
 
+def _apply_optional_overlays(
+    *,
+    result,
+    symbol: str,
+    interval: Interval,
+    limit: int,
+    history_provider: HistoricalProvider,
+    feature_columns: tuple[str, ...],
+    model_config: ModelConfig,
+    strategy_config: StrategyConfig,
+    auto_adjust_windows: bool,
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]],
+):
+    adjusted = _maybe_apply_daily_confirmation(
+        result=result,
+        symbol=symbol,
+        limit=limit,
+        history_provider=history_provider,
+        feature_columns=feature_columns,
+        model_config=model_config,
+        strategy_config=strategy_config,
+        auto_adjust_windows=auto_adjust_windows,
+        cache=cache,
+        interval=interval,
+    )
+    if not strategy_config.require_consensus_confirmation:
+        return adjusted
+
+    consensus = run_consensus_diagnostics(
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        history_provider=history_provider,
+        feature_columns=feature_columns,
+        model_config=model_config,
+        strategy_config=replace(strategy_config, require_consensus_confirmation=False),
+        auto_adjust_windows=auto_adjust_windows,
+    )
+    return apply_consensus_confirmation(
+        adjusted,
+        consensus,
+        interval=interval,
+        strategy_config=strategy_config,
+    )
+
+
+def _best_baseline_details(baseline_comparison: pd.DataFrame) -> tuple[str, float]:
+    if baseline_comparison.empty:
+        return "unavailable", float("nan")
+    best_row = baseline_comparison.sort_values("sharpe", ascending=False).iloc[0]
+    return str(best_row["baseline"]), float(best_row["sharpe"])
+
+
+def _build_candidate_search_strategy_config(
+    *,
+    base_config: StrategyConfig,
+    allow_short: bool,
+    confirmation_mode: str,
+) -> StrategyConfig:
+    strategy_config = replace(
+        base_config,
+        allow_short=allow_short,
+        require_daily_confirmation=False,
+        require_consensus_confirmation=False,
+        consensus_gate_mode="entry_only",
+    )
+    if confirmation_mode == "off":
+        return strategy_config
+    if confirmation_mode == "daily":
+        return replace(strategy_config, require_daily_confirmation=True)
+    if confirmation_mode == "consensus_entry":
+        return replace(strategy_config, require_consensus_confirmation=True)
+    if confirmation_mode == "daily_consensus_entry":
+        return replace(strategy_config, require_daily_confirmation=True, require_consensus_confirmation=True)
+    raise ValueError(f"Unsupported confirmation mode: {confirmation_mode}")
+
+
+def _candidate_confirmation_priority(mode: str) -> int:
+    order = {
+        "off": 0,
+        "daily": 1,
+        "consensus_entry": 2,
+        "daily_consensus_entry": 3,
+    }
+    return order.get(mode, len(order))
+
+
+def _candidate_search_priority(candidate: tuple[str, int, bool, str]) -> tuple[object, ...]:
+    feature_pack, n_states, allow_short, confirmation_mode = candidate
+    pack_priority = [
+        "mean_reversion",
+        "trend",
+        "baseline",
+        "regime_mix",
+        "atr_causal",
+        "trend_context",
+        "regime_context",
+        "volatility",
+        "trend_strength",
+        "vol_surface",
+        "regime_mix_v2",
+    ]
+    feature_rank = pack_priority.index(feature_pack) if feature_pack in pack_priority else len(pack_priority)
+    return (
+        abs(n_states - 8),
+        _candidate_confirmation_priority(confirmation_mode),
+        int(allow_short),
+        feature_rank,
+    )
+
+
+def _candidate_search_grid(
+    *,
+    feature_packs: tuple[str, ...],
+    state_counts: tuple[int, ...],
+    short_modes: tuple[bool, ...],
+    confirmation_modes: tuple[str, ...],
+    max_candidates: int | None,
+) -> list[tuple[str, int, bool, str]]:
+    grid = list(product(feature_packs, state_counts, short_modes, confirmation_modes))
+    grid.sort(key=_candidate_search_priority)
+    return grid[:max_candidates] if max_candidates is not None else grid
+
+
 def _bootstrap_interval(result, metric: str) -> tuple[float, float]:
     row = result.bootstrap.loc[result.bootstrap["metric"] == metric]
     if row.empty:
@@ -427,9 +583,10 @@ def run_timeframe_comparison(
                 walk_config=walk_config,
                 strategy_config=strategy_config,
             )
-            result = _maybe_apply_daily_confirmation(
+            result = _apply_optional_overlays(
                 result=result,
                 symbol=symbol,
+                interval=interval,
                 limit=limit,
                 history_provider=history_provider,
                 feature_columns=feature_columns,
@@ -437,7 +594,6 @@ def run_timeframe_comparison(
                 strategy_config=strategy_config,
                 auto_adjust_windows=auto_adjust_windows,
                 cache=cache,
-                interval=interval,
             )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             rows.append(
@@ -513,9 +669,10 @@ def run_feature_pack_comparison(
                 strategy_config=strategy_config,
             )
             if symbol is not None and limit is not None:
-                result = _maybe_apply_daily_confirmation(
+                result = _apply_optional_overlays(
                     result=result,
                     symbol=symbol,
+                    interval=interval,
                     limit=limit,
                     history_provider=history_provider,
                     feature_columns=feature_columns,
@@ -523,7 +680,6 @@ def run_feature_pack_comparison(
                     strategy_config=strategy_config,
                     auto_adjust_windows=auto_adjust_windows,
                     cache=cache,
-                    interval=interval,
                 )
             bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
             consistency = _fold_consistency_metrics(result)
@@ -558,6 +714,263 @@ def run_feature_pack_comparison(
             )
 
     return pd.DataFrame(rows)
+
+
+def run_candidate_search(
+    *,
+    symbol: str,
+    interval: Interval,
+    limit: int,
+    history_provider: HistoricalProvider = "auto",
+    base_model_config: ModelConfig | None = None,
+    base_strategy_config: StrategyConfig | None = None,
+    feature_packs: tuple[str, ...] | None = None,
+    state_counts: tuple[int, ...] = (5, 6, 7, 8, 9),
+    short_modes: tuple[bool, ...] = (False, True),
+    confirmation_modes: tuple[str, ...] = CANDIDATE_CONFIRMATION_MODES,
+    robustness_symbols: tuple[str, ...] = ("BTCUSD", "ETHUSD", "SOLUSD"),
+    auto_adjust_windows: bool = True,
+    max_candidates: int | None = 32,
+    robustness_top_k: int = 2,
+) -> pd.DataFrame:
+    model_config = base_model_config or ModelConfig()
+    strategy_template = base_strategy_config or StrategyConfig()
+    selected_feature_packs = feature_packs or tuple(list_feature_packs())
+    cache: dict[tuple[str, Interval, int, HistoricalProvider, tuple[str, ...]], tuple[DataFetchResult, pd.DataFrame]] = {}
+    rows: list[dict[str, object]] = []
+    contexts: dict[tuple[str, int, bool, str], dict[str, object]] = {}
+
+    for feature_pack, n_states, allow_short, confirmation_mode in _candidate_search_grid(
+        feature_packs=tuple(selected_feature_packs),
+        state_counts=tuple(sorted(set(int(item) for item in state_counts))),
+        short_modes=tuple(short_modes),
+        confirmation_modes=tuple(confirmation_modes),
+        max_candidates=max_candidates,
+    ):
+        feature_columns = get_feature_columns(feature_pack)
+        try:
+            fetched, feature_frame = _fetch_feature_context(
+                symbol=symbol,
+                interval=interval,
+                feature_columns=feature_columns,
+                limit=limit,
+                history_provider=history_provider,
+                cache=cache,
+            )
+            walk_config, was_adjusted = _resolve_walk_config(feature_frame, interval, auto_adjust_windows)
+            strategy_config = _build_candidate_search_strategy_config(
+                base_config=strategy_template,
+                allow_short=allow_short,
+                confirmation_mode=confirmation_mode,
+            )
+            current_model_config = replace(model_config, n_states=n_states)
+            result = run_walk_forward(
+                feature_frame=feature_frame,
+                feature_columns=feature_columns,
+                interval=interval,
+                model_config=current_model_config,
+                walk_config=walk_config,
+                strategy_config=replace(
+                    strategy_config,
+                    require_daily_confirmation=False,
+                    require_consensus_confirmation=False,
+                ),
+            )
+            result = _apply_optional_overlays(
+                result=result,
+                symbol=symbol,
+                interval=interval,
+                limit=limit,
+                history_provider=history_provider,
+                feature_columns=feature_columns,
+                model_config=current_model_config,
+                strategy_config=strategy_config,
+                auto_adjust_windows=auto_adjust_windows,
+                cache=cache,
+            )
+            nested_summary = nested_holdout_evaluation(
+                predictions=result.predictions,
+                n_states=n_states,
+                base_config=strategy_config,
+                interval=interval,
+                outer_holdout_folds=1,
+            )
+            candidate_score, candidate_status, notes, _ = _score_candidate(result, pd.DataFrame(), nested_summary)
+            bootstrap_lower, _ = _bootstrap_interval(result, "sharpe")
+            best_baseline, best_baseline_sharpe = _best_baseline_details(result.baseline_comparison)
+            contexts[(feature_pack, n_states, allow_short, confirmation_mode)] = {
+                "feature_columns": feature_columns,
+                "model_config": current_model_config,
+                "strategy_config": strategy_config,
+                "walk_config": walk_config,
+                "result": result,
+                "was_adjusted": was_adjusted,
+            }
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "provider": fetched.provider,
+                    "feature_pack": feature_pack,
+                    "n_states": n_states,
+                    "shorting_mode": "long_short" if allow_short else "long_only",
+                    "confirmation_mode": confirmation_mode,
+                    "usable_rows": len(feature_frame),
+                    "walk_adjusted": was_adjusted,
+                    "sharpe": result.metrics["sharpe"],
+                    "bootstrap_sharpe_lower": bootstrap_lower,
+                    "annualized_return": result.metrics["annualized_return"],
+                    "max_drawdown": result.metrics["max_drawdown"],
+                    "trades": result.metrics["trades"],
+                    "stability_score": float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0,
+                    "outer_holdout_sharpe": float(nested_summary.get("outer_holdout_sharpe", 0.0)),
+                    "robustness_median_sharpe": float("nan"),
+                    "robustness_evaluated": False,
+                    "best_baseline": best_baseline,
+                    "best_baseline_sharpe": best_baseline_sharpe,
+                    "promotion_verdict": "Pending Robustness",
+                    "engine_recommendation": "Pending robustness check",
+                    "recommendation_detail": "Cross-asset robustness is only run on the top ranked primary-symbol variants to keep the search tractable.",
+                    "candidate_score": candidate_score,
+                    "candidate_status": candidate_status,
+                    "notes": f"{notes},robustness_not_evaluated" if notes else "robustness_not_evaluated",
+                }
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "provider": history_provider,
+                    "feature_pack": feature_pack,
+                    "n_states": n_states,
+                    "shorting_mode": "long_short" if allow_short else "long_only",
+                    "confirmation_mode": confirmation_mode,
+                    "usable_rows": 0,
+                    "walk_adjusted": False,
+                    "sharpe": float("nan"),
+                    "bootstrap_sharpe_lower": float("nan"),
+                    "annualized_return": float("nan"),
+                    "max_drawdown": float("nan"),
+                    "trades": 0.0,
+                    "stability_score": float("nan"),
+                    "outer_holdout_sharpe": float("nan"),
+                    "robustness_median_sharpe": float("nan"),
+                    "robustness_evaluated": False,
+                    "best_baseline": "unavailable",
+                    "best_baseline_sharpe": float("nan"),
+                    "promotion_verdict": "Error",
+                    "engine_recommendation": "Research failed",
+                    "recommendation_detail": str(exc),
+                    "candidate_score": -999.0,
+                    "candidate_status": "error",
+                    "notes": str(exc),
+                }
+            )
+
+    leaderboard = pd.DataFrame(rows)
+    if leaderboard.empty:
+        return pd.DataFrame(columns=CANDIDATE_SEARCH_COLUMNS)
+
+    leaderboard = leaderboard.sort_values(
+        ["candidate_score", "sharpe", "outer_holdout_sharpe"],
+        ascending=[False, False, False],
+        kind="stable",
+    ).reset_index(drop=True)
+    if robustness_top_k > 0:
+        top_k = min(int(robustness_top_k), len(leaderboard))
+        for row_index in range(top_k):
+            row = leaderboard.iloc[row_index]
+            context = contexts.get(
+                (
+                    str(row["feature_pack"]),
+                    int(row["n_states"]),
+                    str(row["shorting_mode"]) == "long_short",
+                    str(row["confirmation_mode"]),
+                )
+            )
+            if context is None:
+                continue
+            robustness = run_multi_asset_robustness(
+                symbols=list(robustness_symbols),
+                interval=interval,
+                limit=limit,
+                history_provider=history_provider,
+                feature_columns=tuple(context["feature_columns"]),
+                model_config=context["model_config"],
+                walk_config=context["walk_config"],
+                strategy_config=context["strategy_config"],
+                auto_adjust_windows=auto_adjust_windows,
+            )
+            result = context["result"]
+            nested_summary = nested_holdout_evaluation(
+                predictions=result.predictions,
+                n_states=int(row["n_states"]),
+                base_config=context["strategy_config"],
+                interval=interval,
+                outer_holdout_folds=1,
+            )
+            candidate_score, candidate_status, notes, _ = _score_candidate(result, robustness, nested_summary)
+            promotion_gates = build_promotion_gate_rows(
+                metrics=result.metrics,
+                bootstrap=result.bootstrap,
+                state_stability=result.state_stability,
+                robustness=robustness,
+                baseline_comparison=result.baseline_comparison,
+                interval=interval,
+                available_rows=int(row["usable_rows"]),
+                walk_adjusted=bool(context["was_adjusted"]),
+                fold_count=int(len(result.fold_diagnostics)),
+                nested_holdout=nested_summary,
+            )
+            promotion_summary = summarize_promotion_gates(promotion_gates)
+            recommendation = recommend_strategy_engine(
+                strategy_metrics=result.metrics,
+                baseline_comparison=result.baseline_comparison,
+                promotion_summary=promotion_summary,
+            )
+            ok_robustness = robustness.loc[robustness["status"] == "ok"] if "status" in robustness.columns else pd.DataFrame()
+            robustness_median = float(ok_robustness["sharpe"].median()) if not ok_robustness.empty else float("nan")
+            leaderboard.loc[row_index, "outer_holdout_sharpe"] = float(nested_summary.get("outer_holdout_sharpe", 0.0))
+            leaderboard.loc[row_index, "robustness_median_sharpe"] = robustness_median
+            leaderboard.loc[row_index, "robustness_evaluated"] = True
+            leaderboard.loc[row_index, "promotion_verdict"] = promotion_summary["verdict"]
+            leaderboard.loc[row_index, "engine_recommendation"] = recommendation["headline"]
+            leaderboard.loc[row_index, "recommendation_detail"] = recommendation["summary"]
+            leaderboard.loc[row_index, "candidate_score"] = candidate_score
+            leaderboard.loc[row_index, "candidate_status"] = candidate_status
+            leaderboard.loc[row_index, "notes"] = notes
+
+        leaderboard = leaderboard.sort_values(
+            ["candidate_score", "sharpe", "outer_holdout_sharpe"],
+            ascending=[False, False, False],
+            kind="stable",
+        ).reset_index(drop=True)
+    leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
+    return leaderboard.loc[:, list(CANDIDATE_SEARCH_COLUMNS)]
+
+
+def summarize_candidate_search(leaderboard: pd.DataFrame) -> dict[str, object]:
+    if leaderboard.empty:
+        return {
+            "status": "unavailable",
+            "headline": "Candidate search was not run.",
+            "summary": "No ranked candidate search results are available for this session.",
+        }
+
+    best = leaderboard.iloc[0]
+    return {
+        "status": str(best.get("candidate_status", "unknown")),
+        "headline": str(best.get("engine_recommendation", "Candidate search complete")),
+        "summary": (
+            f"Top ranked variant is {best['feature_pack']} with {int(best['n_states'])} states, "
+            f"{best['shorting_mode']}, and `{best['confirmation_mode']}` confirmation. "
+            f"Sharpe {float(best['sharpe']):.2f}, outer holdout {float(best['outer_holdout_sharpe']):.2f}, "
+            f"robustness median {float(best['robustness_median_sharpe']):.2f}. "
+            f"{best['recommendation_detail']}"
+        ),
+        "best_row": best.to_dict(),
+    }
 
 
 def _candidate_priority(candidate: tuple[Interval, str, int, float, int, int, int]) -> tuple[object, ...]:

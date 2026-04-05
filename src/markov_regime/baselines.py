@@ -141,6 +141,57 @@ def build_daily_trend_filter_baseline(frame: pd.DataFrame, config: StrategyConfi
     return _finalize_baseline_frame(frame, position, config, "daily_trend_filter")
 
 
+def build_atr_causal_trend_baseline(frame: pd.DataFrame, config: StrategyConfig) -> pd.DataFrame:
+    ema_slow = frame["close"].ewm(span=72, adjust=False).mean()
+    atr = _atr(frame, 14)
+    atr_ratio = (atr / frame["close"].replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    atr_momentum = frame.get("atr_momentum_24", frame["close"].pct_change(24) / atr_ratio.replace(0.0, np.nan)).fillna(0.0)
+    causal_gap = frame.get("causal_gap_24", (frame["close"] - ema_slow) / ema_slow.replace(0.0, np.nan)).fillna(0.0)
+    causal_slope = frame.get("causal_slope_24", ema_slow.pct_change(6)).fillna(0.0)
+    position = (
+        (frame["close"] > ema_slow)
+        & (atr_momentum > 0.5)
+        & (causal_gap > 0.0)
+        & (causal_slope > 0.0)
+    ).astype(int)
+    return _finalize_baseline_frame(frame, position, config, "atr_causal_trend")
+
+
+def build_daily_breakout_filter_baseline(frame: pd.DataFrame, config: StrategyConfig) -> pd.DataFrame:
+    entry_level = frame["high"].rolling(20).max().shift(1)
+    daily_trend = frame.get("daily_trend_20", frame.get("trend_24", pd.Series(0.0, index=frame.index))).fillna(0.0)
+    daily_gap = frame.get("daily_ema_gap_20", frame.get("ema_gap_24", pd.Series(0.0, index=frame.index))).fillna(0.0)
+    atr = _atr(frame, 14)
+
+    current_position = 0
+    peak_close = np.nan
+    positions: list[int] = []
+    for close, entry_trigger, trend_bias, gap_bias, atr_now in zip(
+        frame["close"],
+        entry_level,
+        daily_trend,
+        daily_gap,
+        atr,
+        strict=True,
+    ):
+        if np.isnan(entry_trigger) or np.isnan(atr_now):
+            current_position = 0
+            peak_close = np.nan
+        elif current_position == 0 and close > entry_trigger and trend_bias > 0.0 and gap_bias > 0.0:
+            current_position = 1
+            peak_close = float(close)
+        elif current_position == 1:
+            peak_close = max(float(peak_close), float(close)) if not np.isnan(peak_close) else float(close)
+            trailing_stop = peak_close - 2.5 * float(atr_now)
+            if close < trailing_stop or trend_bias <= 0.0:
+                current_position = 0
+                peak_close = np.nan
+        positions.append(current_position)
+
+    position = pd.Series(positions, index=frame.index, dtype="int64")
+    return _finalize_baseline_frame(frame, position, config, "daily_breakout_filter")
+
+
 def build_baseline_frames(frame: pd.DataFrame, config: StrategyConfig) -> dict[str, pd.DataFrame]:
     return {
         "buy_and_hold": build_buy_and_hold_frame(frame),
@@ -150,6 +201,8 @@ def build_baseline_frames(frame: pd.DataFrame, config: StrategyConfig) -> dict[s
         "atr_trend": build_atr_trend_baseline(frame, config),
         "atr_breakout_stop": build_atr_breakout_stop_baseline(frame, config),
         "daily_trend_filter": build_daily_trend_filter_baseline(frame, config),
+        "atr_causal_trend": build_atr_causal_trend_baseline(frame, config),
+        "daily_breakout_filter": build_daily_breakout_filter_baseline(frame, config),
     }
 
 

@@ -5,6 +5,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from markov_regime.consensus import apply_consensus_confirmation, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.config import DataConfig, HistoricalProvider, Interval, ModelConfig, StrategyConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.data import fetch_price_data
@@ -76,6 +77,23 @@ def run_multi_asset_robustness(
                     interval=interval,
                     strategy_config=strategy_config,
                     confirmation_interval="1day",
+                )
+            if strategy_config.require_consensus_confirmation:
+                consensus = run_consensus_diagnostics(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit,
+                    history_provider=history_provider,
+                    feature_columns=feature_columns,
+                    model_config=model_config,
+                    strategy_config=replace(strategy_config, require_consensus_confirmation=False),
+                    auto_adjust_windows=auto_adjust_windows,
+                )
+                result = apply_consensus_confirmation(
+                    result,
+                    consensus,
+                    interval=interval,
+                    strategy_config=strategy_config,
                 )
             rows.append(
                 {

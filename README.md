@@ -19,6 +19,8 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Checks robustness across a multi-asset basket instead of only the primary symbol.
 - Exports the signal history as both CSV and JSON.
 - Benchmarks the HMM against tougher simple references including ATR trend, ATR breakout-stop, and daily-trend-filter baselines.
+- Adds a dedicated candidate-search workflow that ranks feature pack, state count, shorting mode, and confirmation mode on deeper Coinbase-backed crypto history.
+- Makes an explicit engine recommendation in the app: use the HMM, use the best simple baseline, or stay in research / flat mode.
 - Adds a constrained local `autoresearch` loop with a frozen evaluator, feature-pack candidates, `research_program.md`, local `results.tsv` logging, and artifact export for the best runs.
 
 ## Quick Start
@@ -82,6 +84,12 @@ Compare feature packs on the same timeframe:
 
 ```powershell
 python -m markov_regime compare-feature-packs --symbol BTCUSD --interval 4hour --states 8 --provider auto
+```
+
+Rank serious HMM variants on deeper Coinbase-backed history:
+
+```powershell
+python -m markov_regime candidate-search --symbol BTCUSD --interval 4hour --provider coinbase --limit 5000
 ```
 
 Initialize the local autoresearch files:
@@ -150,6 +158,7 @@ python -m streamlit run app.py
 - Local autoresearch leaderboard in ignored `results.tsv`.
 - Feature-pack-aware autoresearch artifacts for the strongest candidates.
 - Primetime readiness reports in `artifacts/primetime/`.
+- Candidate-search leaderboards with promotion verdicts and engine recommendations.
 
 ## Primetime Audit
 
@@ -185,6 +194,20 @@ python -m streamlit run app.py
 - The autoresearch score now also checks early-vs-late fold confirmation so a candidate that only looks good in one part of the sample is penalized.
 - The top-ranked candidates automatically get artifact bundles in `artifacts/` so they can be inspected in the same format as manual app runs.
 - This is a constrained optimization harness, not an unrestricted self-modifying agent. That limitation is intentional so the evaluation logic stays trustworthy.
+
+## Candidate Search
+
+- `python -m markov_regime candidate-search ...` ranks feature pack, state count, shorting mode, and confirmation mode on a deeper Coinbase-backed history lane.
+- Candidate search is staged: it ranks all requested variants on the primary symbol first, then runs the heavier cross-asset robustness check only on the top-ranked variants.
+- The search score includes:
+  - stitched blind-OOS Sharpe
+  - bootstrap lower bound
+  - state stability
+  - outer holdout Sharpe
+  - cross-asset robustness median
+  - best-baseline comparison
+- Search output is intentionally allowed to recommend `Use baseline, not HMM` or `Use no active deployment yet` when the HMM is still not promoted.
+- In the Streamlit app this panel is optional because it is materially heavier than a single run.
 
 ## Known Failure Modes
 

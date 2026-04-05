@@ -26,13 +26,16 @@ from markov_regime.interpretation import (
     build_promotion_gate_rows,
     build_trust_snapshot,
     first_sentence,
+    recommend_strategy_engine,
     summarize_promotion_gates,
 )
 from markov_regime.research import (
     nested_holdout_evaluation,
     nested_holdout_summary_frame,
+    run_candidate_search,
     run_feature_pack_comparison,
     run_timeframe_comparison,
+    summarize_candidate_search,
 )
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
@@ -40,6 +43,7 @@ from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustne
 from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
     plot_baseline_comparison,
+    plot_candidate_search,
     plot_cost_stress,
     plot_consensus_mode_comparison,
     plot_equity_curve,
@@ -147,6 +151,8 @@ with st.sidebar.form("controls"):
     run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
     run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
     run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
+    run_candidate_search_check = st.checkbox("Run candidate search (feature pack / states / shorts / confirmation mode)", value=False)
+    candidate_search_max = st.number_input("Candidate search max variants", min_value=4, max_value=80, value=4, step=4)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
     run_clicked = st.form_submit_button("Run Research")
 
@@ -320,6 +326,26 @@ if run_clicked:
                 outer_holdout_folds=1,
             )
             nested_holdout_table = nested_holdout_summary_frame(nested_holdout)
+            candidate_search_results = (
+                run_candidate_search(
+                    symbol=symbol,
+                    interval=data_config.interval,
+                    limit=int(limit),
+                    history_provider="coinbase",
+                    base_model_config=model_config,
+                    base_strategy_config=execution_strategy_config,
+                    feature_packs=("mean_reversion", "trend", "baseline", "regime_mix", "atr_causal", "trend_context"),
+                    state_counts=(5, 6, 7, 8, 9),
+                    short_modes=(False, True),
+                    confirmation_modes=("off", "daily", "consensus_entry", "daily_consensus_entry"),
+                    robustness_symbols=tuple(parse_symbol_list(robustness_symbols)),
+                    auto_adjust_windows=auto_adjust_windows,
+                    max_candidates=int(candidate_search_max),
+                )
+                if run_candidate_search_check
+                else pd.DataFrame()
+            )
+            candidate_search_summary = summarize_candidate_search(candidate_search_results)
             notes = build_research_notes(selected_result, comparison)
             artifact = write_run_artifact_bundle(
                 symbol=symbol,
@@ -345,6 +371,7 @@ if run_clicked:
                 consensus_summary=consensus.summary if consensus is not None else None,
                 consensus_mode_comparison=consensus_mode_comparison,
                 nested_holdout_summary=pd.DataFrame([nested_holdout]),
+                candidate_search_results=candidate_search_results,
             )
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
@@ -360,6 +387,8 @@ if run_clicked:
                 "consensus_mode_comparison": consensus_mode_comparison,
                 "nested_holdout": nested_holdout,
                 "nested_holdout_table": nested_holdout_table,
+                "candidate_search_results": candidate_search_results,
+                "candidate_search_summary": candidate_search_summary,
                 "confirmation_enabled": bool(data_config.interval == "4hour" and strategy_config.require_daily_confirmation),
                 "confirmation_summary": selected_result.confirmation_summary,
                 "confirmation_result": confirmation_result,
@@ -463,6 +492,13 @@ trust_snapshot = build_trust_snapshot(
     available_rows=analysis["available_rows"],
     walk_adjusted=analysis["walk_adjusted"],
 )
+engine_recommendation = recommend_strategy_engine(
+    strategy_metrics=selected_result.metrics,
+    baseline_comparison=selected_result.baseline_comparison,
+    promotion_summary=promotion_snapshot,
+)
+candidate_search_results = analysis.get("candidate_search_results", pd.DataFrame())
+candidate_search_summary = analysis.get("candidate_search_summary", {})
 metric_lookup = metric_interpretation.set_index("metric")
 
 metric_items = [
@@ -504,6 +540,13 @@ elif trust_snapshot["severity"] == "error":
     st.error(trust_message)
 else:
     st.warning(trust_message)
+
+if engine_recommendation["severity"] == "success":
+    st.success(f"{engine_recommendation['headline']}: {engine_recommendation['summary']}")
+elif engine_recommendation["severity"] == "info":
+    st.info(f"{engine_recommendation['headline']}: {engine_recommendation['summary']}")
+else:
+    st.warning(f"{engine_recommendation['headline']}: {engine_recommendation['summary']}")
 
 if execution_plan["severity"] == "success":
     st.success(f"{execution_plan['action']}: {execution_plan['summary']}")
@@ -583,8 +626,8 @@ if live_quote is not None and live_quote.timestamp is not None:
 elif live_quote_error:
     st.warning(f"Live quote fetch was unavailable: {live_quote_error}")
 
-overview_tab, trades_tab, baselines_tab, interpretation_tab, methodology_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
-    ["Overview", "Trades", "Baselines", "Interpretation", "Methodology", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
+overview_tab, trades_tab, baselines_tab, candidate_tab, interpretation_tab, methodology_tab, confirmation_tab, consensus_tab, timeframe_tab, feature_tab, model_tab, stability_tab, sensitivity_tab, confidence_tab, robustness_tab, notes_tab, export_tab = st.tabs(
+    ["Overview", "Trades", "Baselines", "Candidate Search", "Interpretation", "Methodology", "Confirmation", "Consensus", "Timeframes", "Feature Packs", "Model Comparison", "State Stability", "Sensitivity", "Confidence", "Robustness", "Research Notes", "Exports"]
 )
 
 with overview_tab:
@@ -622,7 +665,11 @@ with baselines_tab:
         best_baseline_name = str(best_baseline_row["baseline"])
         best_baseline_sharpe = float(best_baseline_row["sharpe"])
         strategy_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
-        if strategy_sharpe > best_baseline_sharpe:
+        if engine_recommendation["engine"] == "baseline":
+            st.warning(
+                f"Use baseline, not HMM for now. `{best_baseline_name}` is the stronger live reference while the HMM is still research-only."
+            )
+        elif strategy_sharpe > best_baseline_sharpe:
             st.success(
                 f"HMM currently beats the best simple baseline, `{best_baseline_name}`, on Sharpe ({strategy_sharpe:.2f} vs {best_baseline_sharpe:.2f})."
             )
@@ -633,6 +680,23 @@ with baselines_tab:
     st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
     st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
     st.caption("These are simpler reference systems on the same out-of-sample slices, including tougher ATR and daily-trend references. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
+
+with candidate_tab:
+    if candidate_search_results.empty:
+        st.info("Candidate search was not run for this session. Enable it in the sidebar to rank feature pack, state count, shorting mode, and confirmation mode on the deeper history source.")
+    else:
+        if candidate_search_summary.get("headline"):
+            headline = str(candidate_search_summary["headline"])
+            summary = str(candidate_search_summary.get("summary", ""))
+            if str(candidate_search_summary.get("status", "")) == "keep":
+                st.success(f"{headline}: {summary}")
+            elif "baseline" in headline.lower():
+                st.warning(f"{headline}: {summary}")
+            else:
+                st.info(f"{headline}: {summary}")
+        st.plotly_chart(plot_candidate_search(candidate_search_results), use_container_width=True)
+        st.dataframe(candidate_search_results, use_container_width=True, hide_index=True)
+        st.caption("This search uses Coinbase-backed history so the ranking stays on one consistent deep intraday source. It includes promotion gates, outer holdout, and robustness, but it is still prioritized and capped rather than globally exhaustive.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
@@ -696,6 +760,11 @@ with methodology_tab:
                 "component": "Nested Holdout Check",
                 "value": str(nested_holdout.get("status", "not_run")).replace("_", " ").title(),
                 "interpretation": "The inner folds choose settings from the diagnostic sweep, then the most recent untouched outer folds score those settings afterward.",
+            },
+            {
+                "component": "Current Engine Recommendation",
+                "value": engine_recommendation["headline"],
+                "interpretation": engine_recommendation["summary"],
             },
         ]
     )

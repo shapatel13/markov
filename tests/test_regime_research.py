@@ -20,7 +20,7 @@ from markov_regime.consensus import (
 )
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
-from markov_regime.data import fetch_live_quote, fetch_price_data, normalize_symbol
+from markov_regime.data import DataFetchResult, fetch_live_quote, fetch_price_data, normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
 from markov_regime.interpretation import (
@@ -29,6 +29,7 @@ from markov_regime.interpretation import (
     build_metric_interpretation_rows,
     build_promotion_gate_rows,
     build_trust_snapshot,
+    recommend_strategy_engine,
     summarize_promotion_gates,
 )
 from markov_regime.research import (
@@ -39,7 +40,9 @@ from markov_regime.research import (
     load_research_program,
     nested_holdout_evaluation,
     nested_holdout_summary_frame,
+    run_candidate_search,
     run_feature_pack_comparison,
+    summarize_candidate_search,
     write_research_program,
 )
 from markov_regime.readiness import (
@@ -719,6 +722,8 @@ def test_baseline_summary_includes_expected_references(synthetic_feature_frame: 
         "atr_trend",
         "atr_breakout_stop",
         "daily_trend_filter",
+        "atr_causal_trend",
+        "daily_breakout_filter",
     }.issubset(set(baseline_comparison["baseline"]))
     assert {"sharpe", "annualized_return", "trades", "expectancy"}.issubset(baseline_comparison.columns)
 
@@ -1029,6 +1034,18 @@ def test_promotion_gates_require_more_than_positive_sharpe() -> None:
 
 def test_default_strategy_config_prefers_entry_only_consensus_mode() -> None:
     assert StrategyConfig().consensus_gate_mode == "entry_only"
+
+
+def test_recommend_strategy_engine_prefers_positive_baseline_when_hmm_not_promoted() -> None:
+    recommendation = recommend_strategy_engine(
+        strategy_metrics={"sharpe": 0.42},
+        baseline_comparison=pd.DataFrame([{"baseline": "atr_trend", "sharpe": 0.68}]),
+        promotion_summary={"verdict": "Not Ready"},
+    )
+
+    assert recommendation["engine"] == "baseline"
+    assert recommendation["headline"] == "Use baseline, not HMM"
+    assert "atr_trend" in recommendation["summary"]
 
 
 def test_platform_gates_fail_on_stale_quote() -> None:
@@ -1370,6 +1387,56 @@ def test_feature_pack_comparison_runs_on_synthetic_prices(synthetic_prices: pd.D
     assert {"selection_sharpe", "confirmation_sharpe", "fold_consistency_gap"}.issubset(comparison.columns)
 
 
+def test_run_candidate_search_returns_ranked_leaderboard(monkeypatch, synthetic_prices: pd.DataFrame) -> None:
+    def _fake_fetch(data_config: DataConfig, *args, **kwargs) -> DataFetchResult:
+        _ = args
+        _ = kwargs
+        return DataFetchResult(
+            frame=synthetic_prices.copy(),
+            source_url="https://example.com/history",
+            requested_symbol=data_config.symbol,
+            resolved_symbol=data_config.symbol,
+            provider="coinbase",
+            provider_note=None,
+        )
+
+    monkeypatch.setattr("markov_regime.research.fetch_price_data", _fake_fetch)
+    monkeypatch.setattr(
+        "markov_regime.research.run_multi_asset_robustness",
+        lambda **kwargs: pd.DataFrame(
+            [
+                {"symbol": "BTCUSD", "status": "ok", "sharpe": 0.35},
+                {"symbol": "ETHUSD", "status": "ok", "sharpe": 0.22},
+                {"symbol": "SOLUSD", "status": "ok", "sharpe": 0.11},
+            ]
+        ),
+    )
+
+    leaderboard = run_candidate_search(
+        symbol="BTCUSD",
+        interval="1hour",
+        limit=1200,
+        history_provider="auto",
+        base_model_config=ModelConfig(n_states=5, random_state=11, n_iter=150),
+        base_strategy_config=StrategyConfig(required_confirmations=1, min_validation_samples=10),
+        feature_packs=("baseline", "trend"),
+        state_counts=(5,),
+        short_modes=(False,),
+        confirmation_modes=("off",),
+        robustness_symbols=("BTCUSD", "ETHUSD", "SOLUSD"),
+        auto_adjust_windows=True,
+        max_candidates=4,
+    )
+
+    assert not leaderboard.empty
+    assert leaderboard.iloc[0]["rank"] == 1
+    assert {"engine_recommendation", "promotion_verdict", "candidate_score", "recommendation_detail"}.issubset(leaderboard.columns)
+
+    summary = summarize_candidate_search(leaderboard)
+    assert summary["status"] in {"keep", "candidate", "discard"}
+    assert "Top ranked variant" in summary["summary"]
+
+
 def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataFrame) -> None:
     result = run_walk_forward(
         feature_frame=synthetic_feature_frame,
@@ -1426,6 +1493,16 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
         metadata={"feature_pack": "baseline"},
         timeframe_comparison=pd.DataFrame([{"interval": "4hour", "status": "ok", "sharpe": result.metrics["sharpe"]}]),
         consensus_mode_comparison=pd.DataFrame([{"mode": "off", "label": "No Consensus", "selected": True, "sharpe": result.metrics["sharpe"]}]),
+        candidate_search_results=pd.DataFrame(
+            [
+                {
+                    "rank": 1,
+                    "feature_pack": "baseline",
+                    "n_states": 5,
+                    "engine_recommendation": "Use baseline, not HMM",
+                }
+            ]
+        ),
         nested_holdout_summary=pd.DataFrame(
             [
                 {
@@ -1444,6 +1521,7 @@ def test_artifact_bundle_writes_manifest_and_reports(tmp_path: Path, synthetic_f
     assert bundle.files["trade_summary_csv"].exists()
     assert bundle.files["timeframe_comparison_csv"].exists()
     assert bundle.files["consensus_mode_comparison_csv"].exists()
+    assert bundle.files["candidate_search_results_csv"].exists()
     assert bundle.files["nested_holdout_summary_csv"].exists()
     manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
     assert manifest["feature_columns"] == list(FEATURE_COLUMNS)

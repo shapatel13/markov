@@ -265,6 +265,48 @@ def plot_baseline_comparison(baseline_comparison: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def plot_candidate_search(candidate_search: pd.DataFrame) -> go.Figure:
+    if candidate_search.empty:
+        figure = go.Figure()
+        figure.update_layout(
+            title="Candidate Search",
+            template="plotly_white",
+            annotations=[dict(text="No candidate search results available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")],
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        return figure
+
+    top_rows = candidate_search.head(12).copy()
+    top_rows["label"] = top_rows.apply(
+        lambda row: f"{row['feature_pack']} | {int(row['n_states'])}s | {row['shorting_mode']} | {row['confirmation_mode']}",
+        axis=1,
+    )
+    color_map = {"keep": "#0f766e", "candidate": "#d97706", "discard": "#ef4444", "error": "#64748b"}
+    colors = [color_map.get(str(value), "#64748b") for value in top_rows["candidate_status"]]
+
+    figure = go.Figure()
+    figure.add_trace(go.Bar(x=top_rows["label"], y=top_rows["candidate_score"], name="Candidate Score", marker_color=colors))
+    figure.add_trace(
+        go.Scatter(
+            x=top_rows["label"],
+            y=top_rows["sharpe"],
+            mode="lines+markers",
+            name="Sharpe",
+            yaxis="y2",
+            line=dict(color="#1d4ed8"),
+        )
+    )
+    figure.update_layout(
+        title="Candidate Search Leaderboard",
+        template="plotly_white",
+        yaxis=dict(title="Candidate Score"),
+        yaxis2=dict(title="Sharpe", overlaying="y", side="right"),
+        xaxis=dict(title="Variant", tickangle=-35),
+        margin=dict(l=20, r=20, t=50, b=20),
+    )
+    return figure
+
+
 def plot_consensus_mode_comparison(consensus_mode_comparison: pd.DataFrame) -> go.Figure:
     if consensus_mode_comparison.empty:
         figure = go.Figure()

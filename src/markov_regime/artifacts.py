@@ -86,6 +86,7 @@ def write_run_artifact_bundle(
     consensus_summary: pd.DataFrame | None = None,
     consensus_mode_comparison: pd.DataFrame | None = None,
     nested_holdout_summary: pd.DataFrame | None = None,
+    candidate_search_results: pd.DataFrame | None = None,
     export_dir: str | Path = "artifacts",
 ) -> ArtifactBundle:
     created_at = pd.Timestamp.utcnow()
@@ -130,6 +131,8 @@ def write_run_artifact_bundle(
         files["consensus_mode_comparison_csv"] = _write_table(consensus_mode_comparison, root / "consensus_mode_comparison.csv")
     if nested_holdout_summary is not None and not nested_holdout_summary.empty:
         files["nested_holdout_summary_csv"] = _write_table(nested_holdout_summary, root / "nested_holdout_summary.csv")
+    if candidate_search_results is not None and not candidate_search_results.empty:
+        files["candidate_search_results_csv"] = _write_table(candidate_search_results, root / "candidate_search_results.csv")
 
     manifest = {
         "schema_version": 6,
