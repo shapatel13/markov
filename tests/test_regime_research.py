@@ -42,6 +42,13 @@ from markov_regime.research import (
     run_feature_pack_comparison,
     write_research_program,
 )
+from markov_regime.readiness import (
+    PrimetimeAuditResult,
+    build_platform_gate_rows,
+    summarize_platform_gates,
+    summarize_primetime_report,
+    write_primetime_audit_report,
+)
 from markov_regime.reporting import export_signal_report
 from markov_regime.robustness import parse_symbol_list
 from markov_regime.strategy import (
@@ -841,6 +848,63 @@ def test_promotion_gates_require_more_than_positive_sharpe() -> None:
 
 def test_default_strategy_config_prefers_entry_only_consensus_mode() -> None:
     assert StrategyConfig().consensus_gate_mode == "entry_only"
+
+
+def test_platform_gates_fail_on_stale_quote() -> None:
+    gates = build_platform_gate_rows(
+        tests_passed=True,
+        compile_passed=True,
+        historical_fetch_ok=True,
+        live_quote_ok=True,
+        live_quote_age_seconds=301.0,
+        freshness_threshold_seconds=120.0,
+        export_smoke_ok=True,
+        artifact_smoke_ok=True,
+        blind_oos_only=True,
+    )
+    lookup = gates.set_index("gate")
+
+    assert lookup.loc["Live Quote Freshness", "status"] == "fail"
+
+
+def test_primetime_summary_distinguishes_platform_and_strategy() -> None:
+    summary = summarize_primetime_report(
+        platform_summary={"verdict": "Operationally Ready", "severity": "success", "summary": "ok"},
+        strategy_summary={"verdict": "Not Ready", "severity": "error", "summary": "not ok"},
+        action_plan={"action": "No Entry"},
+    )
+
+    assert summary["verdict"] == "Platform Ready, Strategy Not Promoted"
+
+
+def test_write_primetime_audit_report_writes_json_and_markdown(tmp_path: Path) -> None:
+    audit = PrimetimeAuditResult(
+        created_at_utc="2026-04-05T00:00:00+00:00",
+        symbol="BTCUSD",
+        resolved_symbol="BTCUSD",
+        interval="4hour",
+        feature_pack="trend",
+        raw_rows=600,
+        usable_rows=512,
+        walk_adjusted=True,
+        fold_count=2,
+        live_quote_price=67000.0,
+        live_quote_age_seconds=30.0,
+        action_plan={"action": "No Entry", "summary": "flat", "entry_guide": "none", "timing_note": "wait"},
+        platform_gates=pd.DataFrame([{"gate": "Pytest Suite", "status": "pass", "detail": "ok"}]),
+        strategy_gates=pd.DataFrame([{"gate": "Positive OOS Sharpe", "status": "fail", "detail": "bad"}]),
+        platform_summary={"verdict": "Operationally Ready", "severity": "success", "summary": "ok"},
+        strategy_summary={"verdict": "Not Ready", "severity": "error", "summary": "not ok"},
+        report_summary={"verdict": "Platform Ready, Strategy Not Promoted", "severity": "warning", "summary": "mixed"},
+        nested_holdout={"status": "insufficient_folds"},
+        pytest_output="49 passed",
+        compile_output="compiled",
+    )
+
+    report_dir = write_primetime_audit_report(audit, output_dir=tmp_path)
+
+    assert (report_dir / "primetime_audit.json").exists()
+    assert (report_dir / "primetime_audit.md").exists()
 
 
 def test_fetch_live_quote_parses_quote_payload() -> None:

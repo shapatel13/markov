@@ -96,6 +96,12 @@ Run the constrained autoresearch batch:
 python -m markov_regime autoresearch
 ```
 
+Run the full primetime readiness audit:
+
+```powershell
+python -m markov_regime readiness-audit --symbol BTCUSD --interval 4hour --feature-pack trend --states 6 --limit 5000
+```
+
 Use a non-default feature pack in any CLI evaluation:
 
 ```powershell
@@ -142,6 +148,31 @@ python -m streamlit run app.py
 - Exported signal reports in `exports/`.
 - Local autoresearch leaderboard in ignored `results.tsv`.
 - Feature-pack-aware autoresearch artifacts for the strongest candidates.
+- Primetime readiness reports in `artifacts/primetime/`.
+
+## Primetime Audit
+
+- `python -m markov_regime readiness-audit ...` runs both operational and strategy-level checks.
+- Operational checks currently verify:
+  - the full pytest suite
+  - compile/import health
+  - historical data fetch
+  - live quote fetch and freshness
+  - signal export smoke
+  - artifact bundle smoke
+  - blind out-of-sample integrity
+- Strategy checks reuse the app's promotion gates, including:
+  - walk-forward fold count
+  - nested holdout availability
+  - bootstrap support
+  - trade count
+  - state stability
+  - cross-asset robustness
+  - baseline comparison
+  - sample depth and window auto-adjustment
+- The audit intentionally separates platform readiness from strategy promotion:
+  - a healthy app can still correctly say the current live setup is not ready for deployment
+  - `No Entry` is not a failure if the model does not see enough validated edge
 
 ## Autoresearch
 
