@@ -298,6 +298,8 @@ def run_walk_forward(
                 "purge_bars": walk_config.purge_bars,
                 "embargo_bars": walk_config.embargo_bars,
                 "converged": fitted.converged,
+                "optimizer_warning_count": len(fitted.fit_messages),
+                "optimizer_warning_text": " | ".join(fitted.fit_messages[:2]),
                 "log_likelihood": log_likelihood,
                 "aic": aic,
                 "bic": bic,

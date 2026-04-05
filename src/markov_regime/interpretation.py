@@ -9,7 +9,7 @@ from markov_regime.config import Interval, StrategyConfig, WalkForwardConfig
 POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
-    "live_engine_mode": "Controls what the top live recommendation follows. `auto` uses the promoted engine, `baseline` forces the strongest simple reference, and `hmm_research` forces the HMM even when it is not promoted.",
+    "live_engine_mode": "Controls what the top live recommendation follows. `auto` uses the promoted engine, `baseline` forces the strongest simple reference, `hmm_ensemble` uses the seed/state-count consensus overlay, and `hmm_research` forces the raw HMM even when it is not promoted.",
     "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline. Defaults now lean toward a 12-month train and 3-month blind test style on the higher timeframes.",
     "provider": "Historical bar source. `auto` keeps Financial Modeling Prep as the primary source, then uses Coinbase deep-history backfill only when FMP's intraday crypto sample is too short, with Yahoo only as a last-resort fallback.",
     "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
@@ -872,6 +872,7 @@ def resolve_live_engine_mode(
     requested_mode: str,
     engine_recommendation: Mapping[str, str],
     best_baseline: str | None = None,
+    consensus_available: bool = False,
 ) -> dict[str, str]:
     requested = str(requested_mode or "auto")
     recommended_engine = str(engine_recommendation.get("engine", "cash"))
@@ -899,8 +900,29 @@ def resolve_live_engine_mode(
             "headline": "HMM Research Mode",
             "summary": "The live cards are following the HMM directly, even if it is not yet promoted. Treat the output as research-only.",
         }
+    if requested == "hmm_ensemble":
+        if consensus_available:
+            return {
+                "engine": "hmm_ensemble",
+                "mode": "hmm_ensemble",
+                "headline": "HMM Ensemble Mode",
+                "summary": "The live cards are following the consensus-filtered HMM ensemble, which requires agreement across nearby seeds and state counts.",
+            }
+        return {
+            "engine": "cash",
+            "mode": "hmm_ensemble",
+            "headline": "HMM Ensemble Unavailable",
+            "summary": "Consensus diagnostics were not available, so the app cannot force the ensemble live mode on this run.",
+        }
 
     if recommended_engine == "hmm":
+        if consensus_available:
+            return {
+                "engine": "hmm_ensemble",
+                "mode": "auto",
+                "headline": "Auto Mode -> HMM Ensemble",
+                "summary": "The HMM cleared the current promotion logic, and the live cards are following the consensus-filtered ensemble version for extra stability.",
+            }
         return {
             "engine": "hmm",
             "mode": "auto",

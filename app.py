@@ -123,6 +123,7 @@ def _engine_mode_label(option: str) -> str:
     labels = {
         "auto": "auto (follow promoted engine)",
         "baseline": "baseline (force strongest simple reference)",
+        "hmm_ensemble": "hmm_ensemble (force consensus-filtered HMM)",
         "hmm_research": "hmm_research (force HMM research output)",
     }
     return labels.get(option, option)
@@ -130,7 +131,7 @@ def _engine_mode_label(option: str) -> str:
 
 engine_mode = st.sidebar.selectbox(
     "Live engine mode",
-    options=["auto", "baseline", "hmm_research"],
+    options=["auto", "baseline", "hmm_ensemble", "hmm_research"],
     index=0,
     format_func=_engine_mode_label,
     help=CONTROL_HELP["live_engine_mode"],
@@ -275,7 +276,8 @@ if run_clicked:
                 }
                 comparison = summarize_state_count_results(results_by_state)
                 confirmation_result = confirmation_results_by_state[selected_states]
-            selected_result = results_by_state[selected_states]
+            raw_hmm_result = results_by_state[selected_states]
+            selected_result = raw_hmm_result
             sweep_results = parameter_sweep(
                 predictions=selected_result.predictions,
                 n_states=selected_states,
@@ -322,7 +324,11 @@ if run_clicked:
                 if run_feature_pack_check
                 else pd.DataFrame()
             )
-            consensus_required = run_consensus_check or strategy_config.require_consensus_confirmation
+            consensus_required = (
+                run_consensus_check
+                or strategy_config.require_consensus_confirmation
+                or engine_mode == "hmm_ensemble"
+            )
             consensus = (
                 run_consensus_diagnostics(
                     symbol=symbol,
@@ -337,9 +343,22 @@ if run_clicked:
                 if consensus_required
                 else None
             )
+            ensemble_result = None
+            if consensus is not None:
+                ensemble_strategy_config = replace(
+                    execution_strategy_config,
+                    require_consensus_confirmation=True,
+                    consensus_gate_mode="entry_only",
+                )
+                ensemble_result = apply_consensus_confirmation(
+                    raw_hmm_result,
+                    consensus,
+                    interval=data_config.interval,
+                    strategy_config=ensemble_strategy_config,
+                )
             consensus_mode_comparison = (
                 compare_consensus_gate_modes(
-                    selected_result,
+                    raw_hmm_result,
                     consensus,
                     interval=data_config.interval,
                     strategy_config=execution_strategy_config,
@@ -349,7 +368,7 @@ if run_clicked:
             )
             if consensus is not None and strategy_config.require_consensus_confirmation:
                 selected_result = apply_consensus_confirmation(
-                    selected_result,
+                    raw_hmm_result,
                     consensus,
                     interval=data_config.interval,
                     strategy_config=execution_strategy_config,
@@ -416,6 +435,8 @@ if run_clicked:
                 "data_provider_note": fetched.provider_note,
                 "comparison": comparison,
                 "selected_result": selected_result,
+                "raw_hmm_result": raw_hmm_result,
+                "ensemble_result": ensemble_result,
                 "sweep_results": sweep_results,
                 "robustness": robustness,
                 "timeframe_comparison": timeframe_comparison,
@@ -469,6 +490,8 @@ if not analysis:
 
 comparison = analysis["comparison"]
 selected_result = analysis["selected_result"]
+raw_hmm_result = analysis.get("raw_hmm_result", selected_result)
+ensemble_result = analysis.get("ensemble_result")
 sweep_results = analysis["sweep_results"]
 robustness = analysis["robustness"]
 timeframe_comparison = analysis["timeframe_comparison"]
@@ -478,6 +501,8 @@ nested_holdout = analysis.get("nested_holdout", {})
 nested_holdout_table = analysis.get("nested_holdout_table", pd.DataFrame())
 notes = analysis["notes"]
 latest_row = selected_result.predictions.iloc[-1]
+raw_hmm_latest_row = raw_hmm_result.predictions.iloc[-1]
+ensemble_latest_row = ensemble_result.predictions.iloc[-1] if ensemble_result is not None and not ensemble_result.predictions.empty else None
 guardrail_text = latest_row["guardrail_reason"] or "accepted"
 live_quote = None
 live_quote_error = ""
@@ -486,7 +511,12 @@ try:
 except Exception as exc:  # pragma: no cover - depends on live vendor behavior
     live_quote_error = str(exc)
 execution_plan = build_execution_plan(
-    latest_row=latest_row.to_dict(),
+    latest_row=raw_hmm_latest_row.to_dict(),
+    interval=analysis["interval"],
+    live_price=float(live_quote.price) if live_quote is not None else None,
+)
+ensemble_execution_plan = build_execution_plan(
+    latest_row=ensemble_latest_row.to_dict() if ensemble_latest_row is not None else raw_hmm_latest_row.to_dict(),
     interval=analysis["interval"],
     live_price=float(live_quote.price) if live_quote is not None else None,
 )
@@ -544,6 +574,7 @@ live_engine = resolve_live_engine_mode(
     requested_mode=engine_mode,
     engine_recommendation=engine_recommendation,
     best_baseline=best_baseline_name,
+    consensus_available=ensemble_result is not None,
 )
 baseline_execution_plan = (
     build_baseline_execution_plan(
@@ -565,9 +596,15 @@ if live_engine["engine"] == "baseline" and baseline_execution_plan is not None:
 elif live_engine["engine"] == "hmm":
     active_execution_plan = execution_plan
     active_engine_name = f"HMM ({analysis['feature_pack']}, {analysis['model_config'].n_states} states)"
-    active_held_position = {1: "Long", 0: "Flat", -1: "Short"}.get(int(latest_row.get("signal_position", 0)), "Flat")
-    active_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
-    active_annualized_return = float(selected_result.metrics.get("annualized_return", 0.0))
+    active_held_position = {1: "Long", 0: "Flat", -1: "Short"}.get(int(raw_hmm_latest_row.get("signal_position", 0)), "Flat")
+    active_sharpe = float(raw_hmm_result.metrics.get("sharpe", 0.0))
+    active_annualized_return = float(raw_hmm_result.metrics.get("annualized_return", 0.0))
+elif live_engine["engine"] == "hmm_ensemble" and ensemble_result is not None:
+    active_execution_plan = ensemble_execution_plan
+    active_engine_name = f"HMM Ensemble ({analysis['feature_pack']}, {analysis['model_config'].n_states} states)"
+    active_held_position = {1: "Long", 0: "Flat", -1: "Short"}.get(int(ensemble_latest_row.get("signal_position", 0)), "Flat")
+    active_sharpe = float(ensemble_result.metrics.get("sharpe", 0.0))
+    active_annualized_return = float(ensemble_result.metrics.get("annualized_return", 0.0))
 else:
     active_execution_plan = {
         "action": "No Active Deployment",
@@ -638,7 +675,9 @@ if live_engine["engine"] == "baseline" and best_baseline_name is not None:
         "The HMM cards below remain available as research diagnostics."
     )
 elif live_engine["engine"] == "hmm":
-    st.caption("Live execution is currently following the HMM research engine because it is the selected or promoted path for this run.")
+    st.caption("Live execution is currently following the raw HMM research engine. Treat this as the most direct model read, not the most conservative HMM deployment path.")
+elif live_engine["engine"] == "hmm_ensemble":
+    st.caption("Live execution is currently following the consensus-filtered HMM ensemble. This path only acts when nearby seeds and state counts broadly agree with the trade direction.")
 else:
     st.caption("Live execution is intentionally flat because no engine is strong enough to justify deployment on this run.")
 
@@ -662,7 +701,7 @@ research_metric_items.extend(
         ("HMM Ann. Return", str(metric_lookup.loc["Annualized Return", "value"]), first_sentence(str(metric_lookup.loc["Annualized Return", "interpretation"]))),
     ]
 )
-st.caption("HMM research diagnostics below show what the regime model itself believes, even when the selected live engine is a simpler promoted baseline.")
+st.caption("HMM research diagnostics below show the selected HMM research path for this run, even when the selected live engine is a simpler promoted baseline or the ensemble-filtered HMM.")
 research_columns = st.columns(len(research_metric_items))
 for column, (label, value, note) in zip(research_columns, research_metric_items, strict=True):
     column.markdown(
@@ -684,6 +723,24 @@ if selected_result.converged_ratio < 1.0:
     st.warning(
         f"HMM convergence quality was {selected_result.converged_ratio:.0%} across walk-forward folds. "
         "A non-converged fold does not automatically invalidate the run, but it does make the regime fit less trustworthy."
+    )
+optimizer_warning_count = 0
+optimizer_warning_folds = 0
+optimizer_warning_excerpt = ""
+if "optimizer_warning_count" in selected_result.fold_diagnostics.columns:
+    optimizer_warning_count = int(selected_result.fold_diagnostics["optimizer_warning_count"].fillna(0).sum())
+    optimizer_warning_folds = int((selected_result.fold_diagnostics["optimizer_warning_count"].fillna(0) > 0).sum())
+    warning_texts = (
+        selected_result.fold_diagnostics.get("optimizer_warning_text", pd.Series(dtype=str))
+        .fillna("")
+        .astype(str)
+    )
+    non_empty_warning_texts = [text for text in warning_texts.tolist() if text.strip()]
+    optimizer_warning_excerpt = non_empty_warning_texts[0] if non_empty_warning_texts else ""
+if optimizer_warning_count > 0:
+    st.warning(
+        f"HMM optimizer warnings appeared in {optimizer_warning_folds} fold(s) ({optimizer_warning_count} total warning lines). "
+        "The warnings are now captured into fold diagnostics instead of printing raw optimizer spam into the terminal."
     )
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
     st.caption(
@@ -900,6 +957,19 @@ with methodology_tab:
                 "component": "Model Convergence",
                 "value": f"{selected_result.converged_ratio:.0%}",
                 "interpretation": "This is the share of walk-forward folds whose HMM optimizer reported convergence. Lower values do not guarantee the signal is wrong, but they do make the fitted regimes less trustworthy.",
+            },
+            {
+                "component": "Optimizer Warnings",
+                "value": (
+                    f"{optimizer_warning_folds} folds / {optimizer_warning_count} lines"
+                    if optimizer_warning_count > 0
+                    else "None captured"
+                ),
+                "interpretation": (
+                    f"Example warning: {optimizer_warning_excerpt}"
+                    if optimizer_warning_excerpt
+                    else "Optimizer stderr is captured into fold diagnostics so convergence issues are inspectable without flooding the terminal."
+                ),
             },
             {
                 "component": "Current Engine Recommendation",

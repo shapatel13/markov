@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -38,6 +39,7 @@ from markov_regime.interpretation import (
     resolve_live_engine_mode,
     summarize_promotion_gates,
 )
+from markov_regime.model import fit_hmm
 from markov_regime.research import (
     ResearchProgram,
     _candidate_grid,
@@ -1179,6 +1181,58 @@ def test_resolve_live_engine_mode_forces_hmm_research() -> None:
 
     assert resolved["engine"] == "hmm"
     assert resolved["mode"] == "hmm_research"
+
+
+def test_resolve_live_engine_mode_forces_hmm_ensemble_when_consensus_is_available() -> None:
+    resolved = resolve_live_engine_mode(
+        requested_mode="hmm_ensemble",
+        engine_recommendation={"engine": "hmm", "best_baseline": "daily_breakout_filter"},
+        best_baseline="daily_breakout_filter",
+        consensus_available=True,
+    )
+
+    assert resolved["engine"] == "hmm_ensemble"
+    assert resolved["mode"] == "hmm_ensemble"
+
+
+def test_resolve_live_engine_mode_returns_cash_when_hmm_ensemble_is_unavailable() -> None:
+    resolved = resolve_live_engine_mode(
+        requested_mode="hmm_ensemble",
+        engine_recommendation={"engine": "hmm", "best_baseline": "daily_breakout_filter"},
+        best_baseline="daily_breakout_filter",
+        consensus_available=False,
+    )
+
+    assert resolved["engine"] == "cash"
+    assert "Unavailable" in resolved["headline"]
+
+
+def test_fit_hmm_captures_optimizer_stderr(monkeypatch, synthetic_feature_frame: pd.DataFrame) -> None:
+    class _DummyMonitor:
+        converged = True
+
+    class _DummyGaussianHMM:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = args
+            _ = kwargs
+            self.monitor_ = _DummyMonitor()
+
+        def fit(self, x_scaled):
+            _ = x_scaled
+            print("Model is not converging. current: 1.0 is not greater than 1.1", file=sys.stderr)
+            return self
+
+    monkeypatch.setattr("markov_regime.model.GaussianHMM", _DummyGaussianHMM)
+
+    fitted = fit_hmm(
+        synthetic_feature_frame,
+        tuple(FEATURE_COLUMNS),
+        ModelConfig(n_states=5),
+    )
+
+    assert fitted.converged is True
+    assert fitted.fit_messages
+    assert "not converging" in fitted.fit_messages[0]
 
 
 def test_platform_gates_fail_on_stale_quote() -> None:

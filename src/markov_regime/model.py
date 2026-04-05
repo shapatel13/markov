@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -25,6 +27,7 @@ class FittedHMM:
     model: GaussianHMM
     scaler: StandardScaler
     converged: bool
+    fit_messages: tuple[str, ...] = ()
 
 
 def fit_hmm(
@@ -42,9 +45,12 @@ def fit_hmm(
         random_state=config.random_state,
         min_covar=config.min_covar,
     )
-    model.fit(x_scaled)
+    stderr_buffer = io.StringIO()
+    with contextlib.redirect_stderr(stderr_buffer):
+        model.fit(x_scaled)
+    fit_messages = tuple(line.strip() for line in stderr_buffer.getvalue().splitlines() if line.strip())
     converged = bool(getattr(model.monitor_, "converged", True))
-    return FittedHMM(model=model, scaler=scaler, converged=converged)
+    return FittedHMM(model=model, scaler=scaler, converged=converged, fit_messages=fit_messages)
 
 
 def annotate_posteriors(
