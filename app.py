@@ -377,6 +377,7 @@ if run_clicked:
                     robustness_symbols=tuple(parse_symbol_list(robustness_symbols)),
                     auto_adjust_windows=auto_adjust_windows,
                     max_candidates=int(candidate_search_max),
+                    seed_robustness_top_k=min(2, int(candidate_search_max)),
                 )
                 if run_candidate_search_check
                 else pd.DataFrame()
@@ -830,7 +831,7 @@ with candidate_tab:
                 st.info(f"{headline}: {summary}")
         st.plotly_chart(plot_candidate_search(candidate_search_results), use_container_width=True)
         st.dataframe(candidate_search_results, use_container_width=True, hide_index=True)
-        st.caption("This search uses `auto` historical sourcing: FMP stays primary, Coinbase is used only as deep-history backfill when FMP intraday crypto history is too short, and Yahoo remains a last-resort fallback. It includes promotion gates, outer holdout, and robustness, but it is still prioritized and capped rather than globally exhaustive.")
+        st.caption("This search uses `auto` historical sourcing: FMP stays primary, Coinbase is used only as deep-history backfill when FMP intraday crypto history is too short, and Yahoo remains a last-resort fallback. It includes promotion gates, outer holdout, cross-asset robustness, and staged multi-seed HMM checks on the top variants, but it is still prioritized and capped rather than globally exhaustive.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)

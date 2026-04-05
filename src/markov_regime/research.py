@@ -96,6 +96,14 @@ CANDIDATE_SEARCH_COLUMNS: tuple[str, ...] = (
     "trades",
     "stability_score",
     "outer_holdout_sharpe",
+    "seed_median_sharpe",
+    "seed_sharpe_std",
+    "seed_median_stability",
+    "seed_latest_candidate_share",
+    "seed_avg_position_share",
+    "seed_converged_ratio",
+    "seed_member_count",
+    "seed_evaluated",
     "robustness_median_sharpe",
     "robustness_evaluated",
     "best_baseline",
@@ -463,10 +471,43 @@ def _fold_consistency_metrics(result) -> dict[str, float]:
     }
 
 
+def _empty_seed_metrics() -> dict[str, float | int | bool]:
+    return {
+        "seed_median_sharpe": float("nan"),
+        "seed_sharpe_std": float("nan"),
+        "seed_median_stability": float("nan"),
+        "seed_latest_candidate_share": float("nan"),
+        "seed_avg_position_share": float("nan"),
+        "seed_converged_ratio": float("nan"),
+        "seed_member_count": 0,
+        "seed_evaluated": False,
+    }
+
+
+def _seed_robustness_metrics(consensus) -> dict[str, float | int | bool]:
+    if consensus is None or consensus.members.empty or consensus.timeline.empty:
+        return _empty_seed_metrics()
+
+    members = consensus.members
+    timeline = consensus.timeline
+    latest = timeline.iloc[-1]
+    return {
+        "seed_median_sharpe": float(members["sharpe"].median()),
+        "seed_sharpe_std": float(members["sharpe"].std(ddof=0) if len(members) > 1 else 0.0),
+        "seed_median_stability": float(members["stability_score"].median()) if "stability_score" in members.columns else float("nan"),
+        "seed_latest_candidate_share": float(latest.get("candidate_consensus_share", float("nan"))),
+        "seed_avg_position_share": float(timeline["position_consensus_share"].mean()),
+        "seed_converged_ratio": float(members["converged_ratio"].mean()) if "converged_ratio" in members.columns else float("nan"),
+        "seed_member_count": int(len(members)),
+        "seed_evaluated": True,
+    }
+
+
 def _score_candidate(
     result,
     robustness: pd.DataFrame,
     nested_summary: dict[str, object] | None = None,
+    seed_metrics: dict[str, float | int | bool] | None = None,
 ) -> tuple[float, str, str, dict[str, float]]:
     bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
     stability = float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0
@@ -476,6 +517,14 @@ def _score_candidate(
     robustness_median = float(ok_rows["sharpe"].median()) if not ok_rows.empty else float("nan")
     consistency = _fold_consistency_metrics(result)
     outer_holdout_sharpe = float(nested_summary.get("outer_holdout_sharpe", 0.0)) if nested_summary else 0.0
+    seed_context = seed_metrics or _empty_seed_metrics()
+    seed_median_sharpe = float(seed_context.get("seed_median_sharpe", float("nan")))
+    seed_sharpe_std = float(seed_context.get("seed_sharpe_std", float("nan")))
+    seed_median_stability = float(seed_context.get("seed_median_stability", float("nan")))
+    seed_latest_candidate_share = float(seed_context.get("seed_latest_candidate_share", float("nan")))
+    seed_avg_position_share = float(seed_context.get("seed_avg_position_share", float("nan")))
+    seed_converged_ratio = float(seed_context.get("seed_converged_ratio", float("nan")))
+    seed_evaluated = bool(seed_context.get("seed_evaluated", False))
 
     score = float(result.metrics["sharpe"])
     score += 0.35 * bootstrap_lower
@@ -487,11 +536,27 @@ def _score_candidate(
     score += 0.35 * outer_holdout_sharpe
     if pd.notna(robustness_median):
         score += 0.15 * robustness_median
+    if seed_evaluated and pd.notna(seed_median_sharpe):
+        score += 0.30 * seed_median_sharpe
+    if seed_evaluated and pd.notna(seed_avg_position_share):
+        score += 0.60 * (seed_avg_position_share - 0.5)
+    if seed_evaluated and pd.notna(seed_latest_candidate_share):
+        score += 0.40 * (seed_latest_candidate_share - 0.5)
+    if seed_evaluated and pd.notna(seed_median_stability):
+        score += 0.30 * (seed_median_stability - 0.5)
+    if seed_evaluated and pd.notna(seed_sharpe_std):
+        score -= 0.20 * seed_sharpe_std
+    if seed_evaluated and pd.notna(seed_converged_ratio):
+        score -= 0.30 * max(0.0, 1.0 - seed_converged_ratio)
     if result.metrics["trades"] < 3:
         score -= 0.75
     if bootstrap_lower <= 0.0:
         score -= 0.5
     if stability < 0.45:
+        score -= 0.5
+    if seed_evaluated and pd.notna(seed_latest_candidate_share) and seed_latest_candidate_share < 0.67:
+        score -= 0.5
+    if seed_evaluated and pd.notna(seed_median_sharpe) and seed_median_sharpe <= 0.0:
         score -= 0.5
 
     notes: list[str] = []
@@ -511,7 +576,25 @@ def _score_candidate(
         notes.append("fold_performance_inconsistent")
     if nested_summary and nested_summary.get("status") == "ok" and outer_holdout_sharpe <= 0.0:
         notes.append("outer_holdout_weak")
+    if seed_evaluated and pd.notna(seed_median_sharpe) and seed_median_sharpe <= 0.0:
+        notes.append("weak_seed_median_sharpe")
+    if seed_evaluated and pd.notna(seed_latest_candidate_share) and seed_latest_candidate_share < 0.67:
+        notes.append("weak_seed_consensus")
+    if seed_evaluated and pd.notna(seed_sharpe_std) and seed_sharpe_std > 1.0:
+        notes.append("seed_performance_dispersion_high")
+    if seed_evaluated and pd.notna(seed_converged_ratio) and seed_converged_ratio < 1.0:
+        notes.append("partial_seed_convergence")
 
+    seed_keep_ok = (
+        not seed_evaluated
+        or (
+            pd.notna(seed_median_sharpe)
+            and seed_median_sharpe > 0.0
+            and pd.notna(seed_latest_candidate_share)
+            and seed_latest_candidate_share >= 0.67
+            and (pd.isna(seed_converged_ratio) or seed_converged_ratio >= 0.95)
+        )
+    )
     if (
         result.metrics["sharpe"] > 0.0
         and bootstrap_lower > 0.0
@@ -519,6 +602,7 @@ def _score_candidate(
         and consistency["confirmation_sharpe"] > 0.0
         and (not nested_summary or nested_summary.get("status") != "ok" or outer_holdout_sharpe > 0.0)
         and (pd.isna(robustness_median) or robustness_median > 0.0)
+        and seed_keep_ok
     ):
         status = "keep"
     elif result.metrics["sharpe"] > 0.0:
@@ -732,6 +816,7 @@ def run_candidate_search(
     auto_adjust_windows: bool = True,
     max_candidates: int | None = 32,
     robustness_top_k: int = 2,
+    seed_robustness_top_k: int = 2,
 ) -> pd.DataFrame:
     model_config = base_model_config or ModelConfig()
     strategy_template = base_strategy_config or StrategyConfig()
@@ -824,16 +909,17 @@ def run_candidate_search(
                     "trades": result.metrics["trades"],
                     "stability_score": float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0,
                     "outer_holdout_sharpe": float(nested_summary.get("outer_holdout_sharpe", 0.0)),
+                    **_empty_seed_metrics(),
                     "robustness_median_sharpe": float("nan"),
                     "robustness_evaluated": False,
                     "best_baseline": best_baseline,
                     "best_baseline_sharpe": best_baseline_sharpe,
                     "promotion_verdict": "Pending Robustness",
                     "engine_recommendation": "Pending robustness check",
-                    "recommendation_detail": "Cross-asset robustness is only run on the top ranked primary-symbol variants to keep the search tractable.",
+                    "recommendation_detail": "Cross-asset robustness and multi-seed HMM checks are only run on the top ranked primary-symbol variants to keep the search tractable.",
                     "candidate_score": candidate_score,
                     "candidate_status": candidate_status,
-                    "notes": f"{notes},robustness_not_evaluated" if notes else "robustness_not_evaluated",
+                    "notes": f"{notes},robustness_not_evaluated,seed_robustness_not_evaluated" if notes else "robustness_not_evaluated,seed_robustness_not_evaluated",
                 }
             )
         except Exception as exc:
@@ -855,6 +941,7 @@ def run_candidate_search(
                     "trades": 0.0,
                     "stability_score": float("nan"),
                     "outer_holdout_sharpe": float("nan"),
+                    **_empty_seed_metrics(),
                     "robustness_median_sharpe": float("nan"),
                     "robustness_evaluated": False,
                     "best_baseline": "unavailable",
@@ -877,8 +964,8 @@ def run_candidate_search(
         ascending=[False, False, False],
         kind="stable",
     ).reset_index(drop=True)
-    if robustness_top_k > 0:
-        top_k = min(int(robustness_top_k), len(leaderboard))
+    if robustness_top_k > 0 or seed_robustness_top_k > 0:
+        top_k = min(max(int(robustness_top_k), int(seed_robustness_top_k)), len(leaderboard))
         for row_index in range(top_k):
             row = leaderboard.iloc[row_index]
             context = contexts.get(
@@ -891,18 +978,42 @@ def run_candidate_search(
             )
             if context is None:
                 continue
-            robustness = run_multi_asset_robustness(
-                symbols=list(robustness_symbols),
-                interval=interval,
-                limit=limit,
-                history_provider=history_provider,
-                feature_columns=tuple(context["feature_columns"]),
-                model_config=context["model_config"],
-                walk_config=context["walk_config"],
-                strategy_config=context["strategy_config"],
-                auto_adjust_windows=auto_adjust_windows,
-            )
             result = context["result"]
+            robustness = pd.DataFrame()
+            robustness_was_evaluated = bool(row_index < int(robustness_top_k))
+            if robustness_was_evaluated:
+                try:
+                    robustness = run_multi_asset_robustness(
+                        symbols=list(robustness_symbols),
+                        interval=interval,
+                        limit=limit,
+                        history_provider=history_provider,
+                        feature_columns=tuple(context["feature_columns"]),
+                        model_config=context["model_config"],
+                        walk_config=context["walk_config"],
+                        strategy_config=context["strategy_config"],
+                        auto_adjust_windows=auto_adjust_windows,
+                    )
+                except Exception:
+                    robustness = pd.DataFrame()
+                    robustness_was_evaluated = False
+            seed_metrics = _empty_seed_metrics()
+            if row_index < int(seed_robustness_top_k):
+                try:
+                    seed_consensus = run_consensus_diagnostics(
+                        symbol=symbol,
+                        interval=interval,
+                        limit=limit,
+                        history_provider=history_provider,
+                        feature_columns=tuple(context["feature_columns"]),
+                        model_config=context["model_config"],
+                        strategy_config=context["strategy_config"],
+                        auto_adjust_windows=auto_adjust_windows,
+                        state_counts=(int(row["n_states"]),),
+                    )
+                    seed_metrics = _seed_robustness_metrics(seed_consensus)
+                except Exception:
+                    seed_metrics = _empty_seed_metrics()
             nested_summary = nested_holdout_evaluation(
                 predictions=result.predictions,
                 n_states=int(row["n_states"]),
@@ -910,7 +1021,7 @@ def run_candidate_search(
                 interval=interval,
                 outer_holdout_folds=1,
             )
-            candidate_score, candidate_status, notes, _ = _score_candidate(result, robustness, nested_summary)
+            candidate_score, candidate_status, notes, _ = _score_candidate(result, robustness, nested_summary, seed_metrics)
             promotion_gates = build_promotion_gate_rows(
                 metrics=result.metrics,
                 bootstrap=result.bootstrap,
@@ -932,14 +1043,22 @@ def run_candidate_search(
             ok_robustness = robustness.loc[robustness["status"] == "ok"] if "status" in robustness.columns else pd.DataFrame()
             robustness_median = float(ok_robustness["sharpe"].median()) if not ok_robustness.empty else float("nan")
             leaderboard.loc[row_index, "outer_holdout_sharpe"] = float(nested_summary.get("outer_holdout_sharpe", 0.0))
+            for key, value in seed_metrics.items():
+                leaderboard.loc[row_index, key] = value
             leaderboard.loc[row_index, "robustness_median_sharpe"] = robustness_median
-            leaderboard.loc[row_index, "robustness_evaluated"] = True
-            leaderboard.loc[row_index, "promotion_verdict"] = promotion_summary["verdict"]
-            leaderboard.loc[row_index, "engine_recommendation"] = recommendation["headline"]
-            leaderboard.loc[row_index, "recommendation_detail"] = recommendation["summary"]
+            leaderboard.loc[row_index, "robustness_evaluated"] = robustness_was_evaluated
+            if robustness_was_evaluated:
+                leaderboard.loc[row_index, "promotion_verdict"] = promotion_summary["verdict"]
+                leaderboard.loc[row_index, "engine_recommendation"] = recommendation["headline"]
+                leaderboard.loc[row_index, "recommendation_detail"] = recommendation["summary"]
             leaderboard.loc[row_index, "candidate_score"] = candidate_score
             leaderboard.loc[row_index, "candidate_status"] = candidate_status
-            leaderboard.loc[row_index, "notes"] = notes
+            note_parts = [notes] if notes else []
+            if not robustness_was_evaluated:
+                note_parts.append("robustness_not_evaluated")
+            if not bool(seed_metrics.get("seed_evaluated", False)):
+                note_parts.append("seed_robustness_not_evaluated")
+            leaderboard.loc[row_index, "notes"] = ",".join(part for part in note_parts if part)
 
         leaderboard = leaderboard.sort_values(
             ["candidate_score", "sharpe", "outer_holdout_sharpe"],
@@ -959,6 +1078,10 @@ def summarize_candidate_search(leaderboard: pd.DataFrame) -> dict[str, object]:
         }
 
     best = leaderboard.iloc[0]
+    seed_sharpe = float(best.get("seed_median_sharpe", float("nan")))
+    seed_share = float(best.get("seed_latest_candidate_share", float("nan")))
+    seed_sharpe_text = f"{seed_sharpe:.2f}" if pd.notna(seed_sharpe) else "n/a"
+    seed_share_text = f"{seed_share:.0%}" if pd.notna(seed_share) else "n/a"
     return {
         "status": str(best.get("candidate_status", "unknown")),
         "headline": str(best.get("engine_recommendation", "Candidate search complete")),
@@ -966,7 +1089,9 @@ def summarize_candidate_search(leaderboard: pd.DataFrame) -> dict[str, object]:
             f"Top ranked variant is {best['feature_pack']} with {int(best['n_states'])} states, "
             f"{best['shorting_mode']}, and `{best['confirmation_mode']}` confirmation. "
             f"Sharpe {float(best['sharpe']):.2f}, outer holdout {float(best['outer_holdout_sharpe']):.2f}, "
-            f"robustness median {float(best['robustness_median_sharpe']):.2f}. "
+            f"robustness median {float(best['robustness_median_sharpe']):.2f}, "
+            f"seed median Sharpe {seed_sharpe_text}, "
+            f"latest seed candidate share {seed_share_text}. "
             f"{best['recommendation_detail']}"
         ),
         "best_row": best.to_dict(),

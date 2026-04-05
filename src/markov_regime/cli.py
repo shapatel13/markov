@@ -214,6 +214,7 @@ def main() -> None:
     candidate_parser.add_argument("--confirmation-modes", default="off,daily,consensus_entry,daily_consensus_entry")
     candidate_parser.add_argument("--max-candidates", type=int, default=32)
     candidate_parser.add_argument("--robustness-top-k", type=int, default=2)
+    candidate_parser.add_argument("--seed-robustness-top-k", type=int, default=2)
     candidate_parser.add_argument("--robustness-symbols", default="BTCUSD,ETHUSD,SOLUSD")
     candidate_parser.add_argument("--posterior-threshold", type=float, default=0.7)
     candidate_parser.add_argument("--min-hold-bars", type=int, default=6)
@@ -282,6 +283,7 @@ def main() -> None:
             auto_adjust_windows=not args.strict_windows,
             max_candidates=args.max_candidates,
             robustness_top_k=args.robustness_top_k,
+            seed_robustness_top_k=args.seed_robustness_top_k,
         )
         summary = summarize_candidate_search(leaderboard)
         print(summary["headline"])

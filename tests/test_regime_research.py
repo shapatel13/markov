@@ -1544,6 +1544,31 @@ def test_run_candidate_search_returns_ranked_leaderboard(monkeypatch, synthetic_
             ]
         ),
     )
+    monkeypatch.setattr(
+        "markov_regime.research.run_consensus_diagnostics",
+        lambda **kwargs: ConsensusDiagnostics(
+            members=pd.DataFrame(
+                [
+                    {"member_id": "seed7", "sharpe": 0.30, "stability_score": 0.62, "converged_ratio": 1.0},
+                    {"member_id": "seed11", "sharpe": 0.35, "stability_score": 0.64, "converged_ratio": 1.0},
+                    {"member_id": "seed15", "sharpe": 0.28, "stability_score": 0.60, "converged_ratio": 1.0},
+                ]
+            ),
+            timeline=pd.DataFrame(
+                [
+                    {
+                        "timestamp": pd.Timestamp("2025-01-01 00:00:00"),
+                        "close": 100.0,
+                        "position_consensus_share": 2 / 3,
+                        "candidate_consensus_share": 2 / 3,
+                        "position_consensus": 1,
+                        "candidate_consensus": 1,
+                    }
+                ]
+            ),
+            summary=pd.DataFrame(),
+        ),
+    )
 
     leaderboard = run_candidate_search(
         symbol="BTCUSD",
@@ -1559,11 +1584,21 @@ def test_run_candidate_search_returns_ranked_leaderboard(monkeypatch, synthetic_
         robustness_symbols=("BTCUSD", "ETHUSD", "SOLUSD"),
         auto_adjust_windows=True,
         max_candidates=4,
+        seed_robustness_top_k=1,
     )
 
     assert not leaderboard.empty
     assert leaderboard.iloc[0]["rank"] == 1
-    assert {"engine_recommendation", "promotion_verdict", "candidate_score", "recommendation_detail"}.issubset(leaderboard.columns)
+    assert {
+        "engine_recommendation",
+        "promotion_verdict",
+        "candidate_score",
+        "recommendation_detail",
+        "seed_median_sharpe",
+        "seed_latest_candidate_share",
+        "seed_evaluated",
+    }.issubset(leaderboard.columns)
+    assert bool(leaderboard.iloc[0]["seed_evaluated"]) is True
 
     summary = summarize_candidate_search(leaderboard)
     assert summary["status"] in {"keep", "candidate", "discard"}
