@@ -104,15 +104,31 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("FMP live-quote workflow with auto-backed long-history crypto research, blind out-of-sample walk-forward diagnostics, explicit guardrails, and conservative research framing.")
+st.caption("FMP-first workflow with live quotes, blind out-of-sample walk-forward diagnostics, explicit guardrails, and optional deep-history backfill only when FMP intraday crypto history is too short.")
+
+
+def _provider_label(option: str) -> str:
+    labels = {
+        "auto": "auto (FMP primary + deep-history backfill)",
+        "fmp": "fmp (Financial Modeling Prep only)",
+        "coinbase": "coinbase (deep-history backfill only)",
+        "yahoo": "yahoo (fallback only)",
+    }
+    return labels.get(option, option)
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC 4H `mean_reversion`, 8 states, auto history provider. The daily lane remains available as context, but it is not a hard veto by default.")
+    st.caption("Default preset: BTC 4H `mean_reversion`, 8 states, auto provider with FMP primary. The daily lane remains available as context, but it is not a hard veto by default.")
     feature_pack_options = list(list_feature_packs())
     symbol = st.text_input("Symbol", value="BTCUSD").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
-    history_provider = st.selectbox("Historical provider", options=["auto", "fmp", "coinbase", "yahoo"], index=0, help=CONTROL_HELP["provider"])
+    history_provider = st.selectbox(
+        "Historical provider",
+        options=["auto", "fmp", "coinbase", "yahoo"],
+        index=0,
+        format_func=_provider_label,
+        help=CONTROL_HELP["provider"],
+    )
     default_walk = default_walk_forward_config(interval)
     feature_pack = st.selectbox(
         "Feature pack",
@@ -331,7 +347,7 @@ if run_clicked:
                     symbol=symbol,
                     interval=data_config.interval,
                     limit=int(limit),
-                    history_provider="coinbase",
+                    history_provider="auto",
                     base_model_config=model_config,
                     base_strategy_config=execution_strategy_config,
                     feature_packs=("mean_reversion", "trend", "baseline", "regime_mix", "atr_causal", "trend_context"),
@@ -421,7 +437,7 @@ if run_clicked:
         st.error(str(exc))
         st.info(
             "Try a larger history, a higher timeframe like `4hour` or `1day`, or enable automatic window sizing. "
-            "For crypto, prefer the `auto` historical provider so the app can backfill beyond vendor intraday caps."
+            "For crypto, prefer the `auto` historical provider so the app keeps FMP primary and only backfills deeper history when needed."
         )
         st.stop()
 
@@ -564,10 +580,15 @@ if analysis["strategy_config"].allow_short:
     st.caption("Shorts are enabled, so bearish validated regimes can surface as `Enter Short` or `Hold Short` instead of only flattening exposure.")
 st.caption("Headline metrics are stitched only from blind test windows. Training and validation slices are excluded from performance totals.")
 st.caption(
-    f"Latest guardrail status: `{guardrail_text}` | Historical provider: `{analysis.get('data_provider', 'n/a')}` | Data request: `{analysis['data_url']}`"
+    f"Latest guardrail status: `{guardrail_text}` | Historical provider: `{_provider_label(str(analysis.get('data_provider', 'n/a')))}` | Data request: `{analysis['data_url']}`"
 )
 if analysis.get("data_provider_note"):
     st.info(f"Historical provider note: {analysis['data_provider_note']}")
+if selected_result.converged_ratio < 1.0:
+    st.warning(
+        f"HMM convergence quality was {selected_result.converged_ratio:.0%} across walk-forward folds. "
+        "A non-converged fold does not automatically invalidate the run, but it does make the regime fit less trustworthy."
+    )
 if analysis["confirmation_enabled"] and analysis["confirmation_data_url"]:
     st.caption(
         f"Daily confirmation source: `{analysis['confirmation_data_url']}` | Provider: `{analysis.get('confirmation_data_provider') or 'n/a'}`"
@@ -683,7 +704,7 @@ with baselines_tab:
 
 with candidate_tab:
     if candidate_search_results.empty:
-        st.info("Candidate search was not run for this session. Enable it in the sidebar to rank feature pack, state count, shorting mode, and confirmation mode on the deeper history source.")
+        st.info("Candidate search was not run for this session. Enable it in the sidebar to rank feature pack, state count, shorting mode, and confirmation mode while keeping FMP primary and only backfilling deeper history when needed.")
     else:
         if candidate_search_summary.get("headline"):
             headline = str(candidate_search_summary["headline"])
@@ -696,7 +717,7 @@ with candidate_tab:
                 st.info(f"{headline}: {summary}")
         st.plotly_chart(plot_candidate_search(candidate_search_results), use_container_width=True)
         st.dataframe(candidate_search_results, use_container_width=True, hide_index=True)
-        st.caption("This search uses Coinbase-backed history so the ranking stays on one consistent deep intraday source. It includes promotion gates, outer holdout, and robustness, but it is still prioritized and capped rather than globally exhaustive.")
+        st.caption("This search uses `auto` historical sourcing: FMP stays primary, Coinbase is used only as deep-history backfill when FMP intraday crypto history is too short, and Yahoo remains a last-resort fallback. It includes promotion gates, outer holdout, and robustness, but it is still prioritized and capped rather than globally exhaustive.")
 
 with timeframe_tab:
     st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
@@ -722,7 +743,7 @@ with methodology_tab:
         [
             {
                 "component": "Historical Provider",
-                "value": str(analysis.get("data_provider", "n/a")).upper(),
+                "value": _provider_label(str(analysis.get("data_provider", "n/a"))),
                 "interpretation": (
                     str(analysis.get("data_provider_note"))
                     if analysis.get("data_provider_note")
@@ -760,6 +781,11 @@ with methodology_tab:
                 "component": "Nested Holdout Check",
                 "value": str(nested_holdout.get("status", "not_run")).replace("_", " ").title(),
                 "interpretation": "The inner folds choose settings from the diagnostic sweep, then the most recent untouched outer folds score those settings afterward.",
+            },
+            {
+                "component": "Model Convergence",
+                "value": f"{selected_result.converged_ratio:.0%}",
+                "interpretation": "This is the share of walk-forward folds whose HMM optimizer reported convergence. Lower values do not guarantee the signal is wrong, but they do make the fitted regimes less trustworthy.",
             },
             {
                 "component": "Current Engine Recommendation",
