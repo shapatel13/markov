@@ -15,6 +15,7 @@ from markov_regime.config import (
 )
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
+from markov_regime.readiness import DEFAULT_AUDIT_STRATEGY, run_primetime_audit, write_primetime_audit_report
 from markov_regime.research import (
     ensure_results_tsv,
     load_research_program,
@@ -24,6 +25,7 @@ from markov_regime.research import (
     write_research_program,
 )
 from markov_regime.reporting import export_signal_report
+from markov_regime.robustness import parse_symbol_list
 from markov_regime.strategy import parameter_sweep
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
@@ -54,14 +56,15 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--embargo-bars", type=int)
     parser.add_argument("--test-bars", type=int)
     parser.add_argument("--refit-stride-bars", type=int)
-    parser.add_argument("--posterior-threshold", type=float, default=0.65)
+    parser.add_argument("--posterior-threshold", type=float, default=0.7)
     parser.add_argument("--min-hold-bars", type=int, default=6)
-    parser.add_argument("--cooldown-bars", type=int, default=3)
+    parser.add_argument("--cooldown-bars", type=int, default=4)
     parser.add_argument("--required-confirmations", type=int, default=2)
-    parser.add_argument("--confidence-gap", type=float, default=0.05)
+    parser.add_argument("--confidence-gap", type=float, default=0.06)
+    parser.add_argument("--allow-short", action="store_true", help="Allow validated bearish regimes to map to short trades.")
     parser.add_argument("--require-daily-confirmation", action="store_true", help="Only execute 4H exposure when the daily lane agrees.")
     parser.add_argument("--require-consensus-confirmation", action="store_true", help="Only execute exposure when nearby seeds and state counts agree.")
-    parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="hard", help="How weak consensus should be handled when the consensus filter is enabled.")
+    parser.add_argument("--consensus-gate-mode", choices=["hard", "entry_only"], default="entry_only", help="How weak consensus should be handled when the consensus filter is enabled.")
     parser.add_argument("--consensus-min-share", type=float, default=0.67, help="Minimum consensus agreement share required before a trade is allowed.")
     parser.add_argument("--cost-bps", type=float, default=10.0)
     parser.add_argument("--spread-bps", type=float, default=4.0)
@@ -81,6 +84,7 @@ def _load_result(args: argparse.Namespace):
         cooldown_bars=args.cooldown_bars,
         required_confirmations=args.required_confirmations,
         confidence_gap=args.confidence_gap,
+        allow_short=args.allow_short,
         require_daily_confirmation=args.require_daily_confirmation,
         require_consensus_confirmation=args.require_consensus_confirmation,
         consensus_min_share=args.consensus_min_share,
@@ -171,6 +175,12 @@ def main() -> None:
     consensus_parser = subparsers.add_parser("consensus", help="Run nearby-state and multi-seed consensus diagnostics")
     _common_parser(consensus_parser)
 
+    readiness_parser = subparsers.add_parser("readiness-audit", help="Run operational and strategy primetime readiness checks")
+    _common_parser(readiness_parser)
+    readiness_parser.add_argument("--robustness-symbols", default="BTCUSD,ETHUSD,SOLUSD")
+    readiness_parser.add_argument("--output-dir", default="artifacts/primetime")
+    readiness_parser.add_argument("--freshness-threshold-seconds", type=float, default=120.0)
+
     init_research_parser = subparsers.add_parser("init-research", help="Create a local research program and results TSV")
     init_research_parser.add_argument("--program", default="research_program.md")
     init_research_parser.add_argument("--results", default="results.tsv")
@@ -192,6 +202,50 @@ def main() -> None:
         program = load_research_program(args.program)
         leaderboard = run_autoresearch(program=program, results_path=args.results)
         print(leaderboard.head(10).to_string(index=False))
+        return
+
+    if args.command == "readiness-audit":
+        interval_daily_confirmation = args.require_daily_confirmation or args.interval == "4hour"
+        audit_strategy = replace(
+            DEFAULT_AUDIT_STRATEGY,
+            posterior_threshold=args.posterior_threshold,
+            min_hold_bars=args.min_hold_bars,
+            cooldown_bars=args.cooldown_bars,
+            required_confirmations=args.required_confirmations,
+            confidence_gap=args.confidence_gap,
+            allow_short=args.allow_short,
+            require_daily_confirmation=interval_daily_confirmation,
+            require_consensus_confirmation=args.require_consensus_confirmation,
+            consensus_min_share=args.consensus_min_share,
+            consensus_gate_mode=args.consensus_gate_mode,
+            cost_bps=args.cost_bps,
+            spread_bps=args.spread_bps,
+            slippage_bps=args.slippage_bps,
+            impact_bps=args.impact_bps,
+        )
+        audit = run_primetime_audit(
+            repo_root=".",
+            symbol=args.symbol,
+            interval=args.interval,
+            feature_pack=args.feature_pack,
+            states=args.states,
+            limit=args.limit,
+            strategy_config=audit_strategy,
+            walk_config=_resolve_cli_walk_config(args),
+            strict_windows=args.strict_windows,
+            robustness_symbols=tuple(parse_symbol_list(args.robustness_symbols)),
+            freshness_threshold_seconds=args.freshness_threshold_seconds,
+        )
+        report_dir = write_primetime_audit_report(audit, output_dir=args.output_dir)
+        print(f"Report verdict: {audit.report_summary['verdict']}")
+        print(audit.report_summary["summary"])
+        print("\nPlatform")
+        print(audit.platform_gates.to_string(index=False))
+        print("\nStrategy")
+        print(audit.strategy_gates.to_string(index=False))
+        print(f"\nCurrent action: {audit.action_plan['action']}")
+        print(audit.action_plan["entry_guide"])
+        print(f"\nReport directory: {report_dir}")
         return
 
     data_config, model_config, feature_columns, strategy_config, walk_config, result = _load_result(args)
