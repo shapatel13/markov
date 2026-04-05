@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from markov_regime.config import DataConfig
+from markov_regime.config import DataConfig, HistoricalProvider
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,8 @@ class DataFetchResult:
     source_url: str
     requested_symbol: str
     resolved_symbol: str
+    provider: HistoricalProvider
+    provider_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,11 @@ CRYPTO_ALIASES: dict[str, str] = {
     "BNB-USD": "BNBUSD",
 }
 
+AUTO_INTRADAY_TARGET_ROWS: dict[str, int] = {
+    "1hour": 2500,
+    "4hour": 1800,
+}
+
 
 def load_api_key(explicit_key: str | None = None) -> str:
     load_dotenv()
@@ -71,6 +78,16 @@ def load_api_key(explicit_key: str | None = None) -> str:
 def normalize_symbol(symbol: str) -> str:
     cleaned = symbol.strip().upper()
     return CRYPTO_ALIASES.get(cleaned, cleaned)
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    return symbol.endswith("USD") and symbol[:-3].isalpha() and len(symbol[:-3]) >= 2
+
+
+def _to_yahoo_symbol(symbol: str) -> str:
+    if _is_crypto_symbol(symbol):
+        return f"{symbol[:-3]}-USD"
+    return symbol
 
 
 def _hourly_url(symbol: str) -> str:
@@ -99,6 +116,14 @@ def _quote_short_url(symbol: str) -> str:
 
 def _legacy_quote_url(symbol: str) -> str:
     return f"https://financialmodelingprep.com/api/v3/quote/{symbol}"
+
+
+def _yahoo_chart_url(symbol: str) -> str:
+    return f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+
+def _coinbase_candles_url(symbol: str) -> str:
+    return f"https://api.exchange.coinbase.com/products/{symbol}/candles"
 
 
 def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
@@ -130,6 +155,67 @@ def _normalize_frame(payload: Any, interval: str) -> pd.DataFrame:
         .drop_duplicates(subset="timestamp")
         .reset_index(drop=True)
     )
+    return normalized
+
+
+def _normalize_yahoo_frame(payload: Any, interval: str) -> pd.DataFrame:
+    chart = payload.get("chart", {}) if isinstance(payload, dict) else {}
+    if chart.get("error"):
+        raise ValueError(f"Yahoo Finance chart error: {chart['error']}")
+
+    result = chart.get("result") if isinstance(chart, dict) else None
+    if not result:
+        raise ValueError("No price data returned from Yahoo Finance.")
+
+    first = result[0]
+    timestamps = first.get("timestamp") or []
+    quotes = ((first.get("indicators") or {}).get("quote") or [{}])[0]
+    if not timestamps:
+        raise ValueError("Yahoo Finance payload did not include timestamps.")
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None),
+            "open": quotes.get("open", []),
+            "high": quotes.get("high", []),
+            "low": quotes.get("low", []),
+            "close": quotes.get("close", []),
+            "volume": quotes.get("volume", []),
+        }
+    )
+    frame = frame.dropna(subset=["open", "high", "low", "close"]).copy()
+    frame["volume"] = frame["volume"].fillna(0.0)
+
+    if interval in {"1hour", "4hour"}:
+        frame = frame.loc[
+            frame["timestamp"].dt.minute.eq(0) & frame["timestamp"].dt.second.eq(0),
+        ].copy()
+
+    normalized = (
+        frame.sort_values("timestamp")
+        .drop_duplicates(subset="timestamp")
+        .reset_index(drop=True)
+    )
+    if normalized.empty:
+        raise ValueError("Yahoo Finance returned only partial or invalid bars.")
+    return normalized
+
+
+def _normalize_coinbase_frame(payload: Any) -> pd.DataFrame:
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("No price data returned from Coinbase.")
+
+    frame = pd.DataFrame(payload, columns=["epoch", "low", "high", "open", "close", "volume"])
+    timestamps = pd.to_datetime(frame["epoch"], unit="s", utc=True).dt.tz_convert(None)
+    normalized = (
+        frame.assign(timestamp=timestamps)
+        .loc[:, ["timestamp", "open", "high", "low", "close", "volume"]]
+        .sort_values("timestamp")
+        .drop_duplicates(subset="timestamp")
+        .reset_index(drop=True)
+    )
+    if normalized.empty:
+        raise ValueError("Coinbase returned an empty candle frame after normalization.")
     return normalized
 
 
@@ -175,14 +261,32 @@ def _resample_ohlcv(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
     return complete
 
 
-def fetch_price_data(
+def _to_utc_timestamp(value: str) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _apply_time_filters(frame: pd.DataFrame, config: DataConfig) -> pd.DataFrame:
+    filtered = frame
+    if config.start:
+        filtered = filtered.loc[filtered["timestamp"] >= pd.Timestamp(config.start)].copy()
+    if config.end:
+        filtered = filtered.loc[filtered["timestamp"] <= pd.Timestamp(config.end)].copy()
+    filtered = _resample_ohlcv(filtered, config.interval)
+    if config.limit > 0:
+        filtered = filtered.tail(config.limit).reset_index(drop=True)
+    return filtered
+
+
+def _fetch_fmp_price_data(
+    *,
     config: DataConfig,
-    api_key: str | None = None,
-    session: requests.Session | None = None,
+    key: str,
+    client: requests.Session,
+    resolved_symbol: str,
 ) -> DataFetchResult:
-    key = load_api_key(api_key)
-    client = session or requests.Session()
-    resolved_symbol = normalize_symbol(config.symbol)
     candidate_urls = (
         [_daily_url(resolved_symbol), _legacy_daily_url(resolved_symbol)]
         if config.interval == "1day"
@@ -212,20 +316,223 @@ def fetch_price_data(
     else:
         raise ValueError(f"Unable to fetch price data from Financial Modeling Prep: {last_error}") from last_error
 
-    frame = _normalize_frame(payload, config.interval)
-    if config.start:
-        frame = frame.loc[frame["timestamp"] >= pd.Timestamp(config.start)].copy()
-    if config.end:
-        frame = frame.loc[frame["timestamp"] <= pd.Timestamp(config.end)].copy()
-    frame = _resample_ohlcv(frame, config.interval)
-    if config.limit > 0:
-        frame = frame.tail(config.limit).reset_index(drop=True)
-
+    frame = _apply_time_filters(_normalize_frame(payload, config.interval), config)
     return DataFetchResult(
         frame=frame,
         source_url=_redact_api_key(response.url) if response else candidate_urls[0],
         requested_symbol=config.symbol,
         resolved_symbol=resolved_symbol,
+        provider="fmp",
+    )
+
+
+def _yahoo_range_for_interval(interval: str) -> str:
+    if interval in {"1hour", "4hour"}:
+        return "730d"
+    return "10y"
+
+
+def _fetch_yahoo_price_data(
+    *,
+    config: DataConfig,
+    client: requests.Session,
+    resolved_symbol: str,
+) -> DataFetchResult:
+    yahoo_symbol = _to_yahoo_symbol(resolved_symbol)
+    url = _yahoo_chart_url(yahoo_symbol)
+    params: dict[str, str | int] = {
+        "interval": "1h" if config.interval in {"1hour", "4hour"} else "1d",
+        "includePrePost": "false",
+        "events": "div,splits,capitalGains",
+    }
+    if config.start or config.end:
+        if config.start:
+            params["period1"] = int(_to_utc_timestamp(config.start).timestamp())
+        if config.end:
+            params["period2"] = int(_to_utc_timestamp(config.end).timestamp())
+    else:
+        params["range"] = _yahoo_range_for_interval(config.interval)
+
+    response = client.get(url, params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    frame = _apply_time_filters(_normalize_yahoo_frame(response.json(), config.interval), config)
+    return DataFetchResult(
+        frame=frame,
+        source_url=response.url,
+        requested_symbol=config.symbol,
+        resolved_symbol=resolved_symbol,
+        provider="yahoo",
+    )
+
+
+def _target_auto_rows(config: DataConfig) -> int:
+    baseline = AUTO_INTRADAY_TARGET_ROWS.get(config.interval, 0)
+    if config.limit > 0:
+        return min(config.limit, baseline) if baseline else config.limit
+    return baseline
+
+
+def _should_try_long_history_fallback(frame: pd.DataFrame, config: DataConfig, resolved_symbol: str) -> bool:
+    if config.interval not in {"1hour", "4hour"} or not _is_crypto_symbol(resolved_symbol):
+        return False
+    if frame.empty:
+        return True
+    if config.start and frame["timestamp"].min() > pd.Timestamp(config.start):
+        return True
+    target_rows = _target_auto_rows(config)
+    return target_rows > 0 and len(frame) < target_rows
+
+
+def _to_coinbase_symbol(symbol: str) -> str:
+    if _is_crypto_symbol(symbol):
+        return f"{symbol[:-3]}-USD"
+    raise ValueError(f"Coinbase long-history backfill only supports crypto USD pairs, received `{symbol}`.")
+
+
+def _coinbase_source_interval(interval: str) -> str:
+    return "1day" if interval == "1day" else "1hour"
+
+
+def _coinbase_granularity(interval: str) -> int:
+    return 86_400 if interval == "1day" else 3_600
+
+
+def _coinbase_source_limit(config: DataConfig) -> int:
+    if config.limit <= 0:
+        return 3000 if config.interval == "1day" else 20_000
+    if config.interval == "4hour":
+        return config.limit * 4
+    return config.limit
+
+
+def _fetch_coinbase_price_data(
+    *,
+    config: DataConfig,
+    client: requests.Session,
+    resolved_symbol: str,
+) -> DataFetchResult:
+    product_symbol = _to_coinbase_symbol(resolved_symbol)
+    source_interval = _coinbase_source_interval(config.interval)
+    granularity = _coinbase_granularity(source_interval)
+    source_limit = _coinbase_source_limit(config)
+    chunk_size = 300
+    seconds_per_bar = granularity
+
+    if config.end:
+        end_time = _to_utc_timestamp(config.end)
+    else:
+        end_time = pd.Timestamp.now(tz="UTC").floor("h" if source_interval == "1hour" else "D")
+
+    if config.start:
+        start_time = _to_utc_timestamp(config.start)
+    else:
+        start_time = end_time - pd.Timedelta(seconds=max(source_limit - 1, 1) * seconds_per_bar)
+
+    request_cursor = start_time
+    responses: list[pd.DataFrame] = []
+    last_url = _coinbase_candles_url(product_symbol)
+
+    while request_cursor < end_time:
+        request_end = min(request_cursor + pd.Timedelta(seconds=seconds_per_bar * chunk_size), end_time)
+        params = {
+            "granularity": str(granularity),
+            "start": request_cursor.isoformat().replace("+00:00", "Z"),
+            "end": request_end.isoformat().replace("+00:00", "Z"),
+        }
+        response = client.get(
+            _coinbase_candles_url(product_symbol),
+            params=params,
+            timeout=30,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload:
+            request_cursor = request_end
+            continue
+        normalized = _normalize_coinbase_frame(payload)
+        responses.append(normalized)
+        last_url = response.url
+        request_cursor = request_end
+
+    if not responses:
+        raise ValueError("Coinbase returned no candles for the requested range.")
+    combined = (
+        pd.concat(responses, ignore_index=True)
+        .sort_values("timestamp")
+        .drop_duplicates(subset="timestamp")
+        .reset_index(drop=True)
+    )
+    frame = _apply_time_filters(combined, config)
+    return DataFetchResult(
+        frame=frame,
+        source_url=last_url,
+        requested_symbol=config.symbol,
+        resolved_symbol=resolved_symbol,
+        provider="coinbase",
+    )
+
+
+def fetch_price_data(
+    config: DataConfig,
+    api_key: str | None = None,
+    session: requests.Session | None = None,
+) -> DataFetchResult:
+    client = session or requests.Session()
+    resolved_symbol = normalize_symbol(config.symbol)
+    fmp_key: str | None = None
+    fmp_key_error: Exception | None = None
+    if config.provider in {"auto", "fmp"}:
+        try:
+            fmp_key = load_api_key(api_key)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            fmp_key_error = exc
+
+    if config.provider == "fmp":
+        if fmp_key is None:
+            raise ValueError(str(fmp_key_error or "FMP API key is unavailable."))
+        return _fetch_fmp_price_data(config=config, key=fmp_key, client=client, resolved_symbol=resolved_symbol)
+
+    if config.provider == "yahoo":
+        return _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+
+    if config.provider == "coinbase":
+        return _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+
+    if fmp_key is None:
+        try:
+            return _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+        except Exception:
+            return _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+
+    fmp_result = _fetch_fmp_price_data(config=config, key=fmp_key, client=client, resolved_symbol=resolved_symbol)
+    if not _should_try_long_history_fallback(fmp_result.frame, config, resolved_symbol):
+        return fmp_result
+
+    fallback_results: list[DataFetchResult] = []
+    for fetcher in (_fetch_coinbase_price_data, _fetch_yahoo_price_data):
+        try:
+            fallback_results.append(fetcher(config=config, client=client, resolved_symbol=resolved_symbol))
+        except Exception:  # pragma: no cover - exercised only when a live fallback is unavailable
+            continue
+
+    if not fallback_results:
+        return fmp_result
+
+    best_fallback = max(fallback_results, key=lambda item: len(item.frame))
+    if len(best_fallback.frame) <= len(fmp_result.frame):
+        return fmp_result
+
+    return DataFetchResult(
+        frame=best_fallback.frame,
+        source_url=best_fallback.source_url,
+        requested_symbol=config.symbol,
+        resolved_symbol=resolved_symbol,
+        provider=best_fallback.provider,
+        provider_note=(
+            f"Auto-selected {best_fallback.provider.title()} long-history bars because Financial Modeling Prep returned "
+            f"{len(fmp_result.frame)} usable `{config.interval}` rows, which is too thin for the requested research depth."
+        ),
     )
 
 

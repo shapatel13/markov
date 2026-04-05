@@ -47,8 +47,9 @@ def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
 def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--symbol", default="BTCUSD")
     parser.add_argument("--interval", choices=["4hour", "1day", "1hour"], default=DEFAULT_CLI_INTERVAL)
-    parser.add_argument("--feature-pack", choices=list(list_feature_packs()), default="trend")
-    parser.add_argument("--states", type=int, default=6)
+    parser.add_argument("--provider", choices=["auto", "fmp", "coinbase", "yahoo"], default="auto")
+    parser.add_argument("--feature-pack", choices=list(list_feature_packs()), default="mean_reversion")
+    parser.add_argument("--states", type=int, default=8)
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--train-bars", type=int)
     parser.add_argument("--purge-bars", type=int)
@@ -74,7 +75,7 @@ def _common_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def _load_result(args: argparse.Namespace):
-    data_config = DataConfig(symbol=args.symbol, interval=args.interval, limit=args.limit)
+    data_config = DataConfig(symbol=args.symbol, interval=args.interval, limit=args.limit, provider=args.provider)
     model_config = ModelConfig(n_states=args.states)
     feature_columns = get_feature_columns(args.feature_pack)
     walk_config = _resolve_cli_walk_config(args)
@@ -111,7 +112,7 @@ def _load_result(args: argparse.Namespace):
         strategy_config=replace(strategy_config, require_daily_confirmation=False),
     )
     if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
-        confirmation_config = DataConfig(symbol=args.symbol, interval="1day", limit=args.limit)
+        confirmation_config = DataConfig(symbol=args.symbol, interval="1day", limit=args.limit, provider=args.provider)
         confirmation_fetched = fetch_price_data(confirmation_config)
         confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
         confirmation_walk_config = (
@@ -139,6 +140,7 @@ def _load_result(args: argparse.Namespace):
             symbol=data_config.symbol,
             interval=data_config.interval,
             limit=data_config.limit,
+            history_provider=args.provider,
             feature_columns=feature_columns,
             model_config=model_config,
             strategy_config=replace(strategy_config, require_consensus_confirmation=False),
@@ -205,7 +207,6 @@ def main() -> None:
         return
 
     if args.command == "readiness-audit":
-        interval_daily_confirmation = args.require_daily_confirmation or args.interval == "4hour"
         audit_strategy = replace(
             DEFAULT_AUDIT_STRATEGY,
             posterior_threshold=args.posterior_threshold,
@@ -214,7 +215,7 @@ def main() -> None:
             required_confirmations=args.required_confirmations,
             confidence_gap=args.confidence_gap,
             allow_short=args.allow_short,
-            require_daily_confirmation=interval_daily_confirmation,
+            require_daily_confirmation=args.require_daily_confirmation,
             require_consensus_confirmation=args.require_consensus_confirmation,
             consensus_min_share=args.consensus_min_share,
             consensus_gate_mode=args.consensus_gate_mode,
@@ -230,6 +231,7 @@ def main() -> None:
             feature_pack=args.feature_pack,
             states=args.states,
             limit=args.limit,
+            history_provider=args.provider,
             strategy_config=audit_strategy,
             walk_config=_resolve_cli_walk_config(args),
             strict_windows=args.strict_windows,
@@ -274,6 +276,7 @@ def main() -> None:
             strategy_config=strategy_config,
             feature_pack=args.feature_pack,
             feature_columns=feature_columns,
+            history_provider=args.provider,
             auto_adjust_windows=not args.strict_windows,
         )
         print(timeframe_results.to_string(index=False))
@@ -288,6 +291,7 @@ def main() -> None:
             strategy_config=strategy_config,
             symbol=data_config.symbol,
             limit=data_config.limit,
+            history_provider=args.provider,
             auto_adjust_windows=not args.strict_windows,
         )
         print(feature_results.to_string(index=False))
@@ -298,6 +302,7 @@ def main() -> None:
             symbol=data_config.symbol,
             interval=data_config.interval,
             limit=data_config.limit,
+            history_provider=args.provider,
             feature_columns=feature_columns,
             model_config=model_config,
             strategy_config=strategy_config,

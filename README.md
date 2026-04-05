@@ -4,8 +4,8 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 
 ## What It Does
 
-- Fetches daily or hourly bars from Financial Modeling Prep and locally resamples complete `4hour` candles from hourly data.
-- Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, and realized skew/kurtosis structure.
+- Fetches live quotes and recent bars from Financial Modeling Prep, and can automatically backfill deeper crypto intraday history from Coinbase or Yahoo when FMP's hourly cap would starve the walk-forward test.
+- Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, realized skew/kurtosis structure, and a causal ATR-normalized momentum lane.
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
 - Stitches performance only from the blind test slices and keeps train / validate periods out of headline return metrics.
 - Compares 5 through 9 HMM states side by side.
@@ -51,25 +51,25 @@ streamlit run app.py
 Backtest:
 
 ```powershell
-python -m markov_regime backtest --symbol BTCUSD --interval 4hour --states 6
+python -m markov_regime backtest --symbol BTCUSD --interval 4hour --feature-pack mean_reversion --states 8 --provider auto
 ```
 
 Sweep:
 
 ```powershell
-python -m markov_regime sweep --symbol BTCUSD --interval 4hour --states 6
+python -m markov_regime sweep --symbol BTCUSD --interval 4hour --feature-pack mean_reversion --states 8 --provider auto
 ```
 
 Export the signal report:
 
 ```powershell
-python -m markov_regime export-report --symbol BTCUSD --interval 4hour --states 6
+python -m markov_regime export-report --symbol BTCUSD --interval 4hour --feature-pack mean_reversion --states 8 --provider auto
 ```
 
 Compare `4hour`, `1day`, and `1hour`:
 
 ```powershell
-python -m markov_regime compare-timeframes --symbol BTCUSD --states 6
+python -m markov_regime compare-timeframes --symbol BTCUSD --feature-pack mean_reversion --states 8 --provider auto
 ```
 
 Backtest `4hour` with daily confirmation turned on:
@@ -81,7 +81,7 @@ python -m markov_regime backtest --symbol BTCUSD --interval 4hour --feature-pack
 Compare feature packs on the same timeframe:
 
 ```powershell
-python -m markov_regime compare-feature-packs --symbol BTCUSD --interval 4hour --states 6
+python -m markov_regime compare-feature-packs --symbol BTCUSD --interval 4hour --states 8 --provider auto
 ```
 
 Initialize the local autoresearch files:
@@ -99,7 +99,7 @@ python -m markov_regime autoresearch
 Run the full primetime readiness audit:
 
 ```powershell
-python -m markov_regime readiness-audit --symbol BTCUSD --interval 4hour --feature-pack trend --states 6 --limit 5000
+python -m markov_regime readiness-audit --symbol BTCUSD --interval 4hour --feature-pack mean_reversion --states 8 --limit 5000 --provider auto
 ```
 
 Use a non-default feature pack in any CLI evaluation:
@@ -120,10 +120,11 @@ python -m streamlit run app.py
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
 - The app now includes a dedicated `Methodology` panel showing the walk-forward schedule, current friction assumptions, and promotion gates for the active run.
 - That same `Methodology` panel now includes a nested holdout check, where inner folds choose sweep settings and the most recent untouched outer folds judge whether those settings still work.
-- The current default operating profile is `BTCUSD` on `4hour` with the `trend` feature pack and daily confirmation enabled. If you turn on consensus gating, `entry_only` is the recommended default because it was safer without collapsing exposure as often as `hard` mode.
+- The current exploratory default operating profile is `BTCUSD` on `4hour` with the `mean_reversion` feature pack, `8` states, and `auto` historical provider. This is a research preset, not a promoted live strategy.
+- In `auto` provider mode, the app keeps FMP for live quotes and will prefer Coinbase for long-history crypto intraday bars, with Yahoo as a backup if Coinbase is unavailable.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
 - The higher-timeframe defaults now approximate a `12 months train / 3 months validate / 3 months blind test` cadence on `4hour` and `1day`.
-- The optional daily confirmation filter acts as an execution veto, not a second alpha model. Daily neutrality is allowed; clear daily opposition blocks the `4hour` trade.
+- The daily lane is still available as slower context, but it is no longer a hard default veto because deeper-sample testing showed that the current best exploratory candidate did not improve when daily confirmation was forced on.
 - State labels are re-aligned after every refit because raw HMM state IDs are not stable.
 - Directional actions come from validation-window forward returns, not the in-sample training fit.
 - The strategy prefers flat exposure when posterior confidence is marginal or when validation support is weak.
@@ -193,6 +194,8 @@ python -m streamlit run app.py
 - Backtest quality can deteriorate quickly once transaction costs, slippage, or stale fills are introduced.
 - Even the richer friction model is still an approximation; it is not a substitute for exchange-specific order book replay or venue-level fill data.
 - The `4hour` candles are aggregated locally from hourly API data, so missing hourly bars or late prints can distort the higher-timeframe candle set.
+- Financial Modeling Prep currently appears capped to roughly the most recent few thousand hourly bars for crypto, so long-history intraday research should use `provider=auto`, `coinbase`, or `yahoo` instead of raw `fmp`.
+- Coinbase and Yahoo are useful research backfills, but they are not perfect substitutes for exchange-level trade and order-book replay.
 - Annualization is crypto-first and assumes 24/7 bars; if you use equity symbols, annualized metrics are only approximate unless you adapt the calendar assumptions.
 - Bootstrap intervals may still understate uncertainty during structural breaks because the future may not resemble any resampled past block.
 - Forward-return tables can look attractive when a regime occurs rarely; sample count should always be read with the mean.

@@ -11,7 +11,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.config import DataConfig, Interval, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
+from markov_regime.config import DataConfig, HistoricalProvider, Interval, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.data import LiveQuote, fetch_live_quote, fetch_price_data
@@ -31,7 +31,7 @@ DEFAULT_AUDIT_STRATEGY = StrategyConfig(
     cooldown_bars=4,
     required_confirmations=2,
     confidence_gap=0.06,
-    require_daily_confirmation=True,
+    require_daily_confirmation=False,
     require_consensus_confirmation=False,
     consensus_min_share=0.67,
     consensus_gate_mode="entry_only",
@@ -50,6 +50,8 @@ class PrimetimeAuditResult:
     resolved_symbol: str
     interval: Interval
     feature_pack: str
+    historical_provider: HistoricalProvider
+    historical_provider_note: str | None
     raw_rows: int
     usable_rows: int
     walk_adjusted: bool
@@ -198,6 +200,7 @@ def run_primetime_audit(
     feature_pack: str = "trend",
     states: int = 6,
     limit: int = 5000,
+    history_provider: HistoricalProvider = "auto",
     strategy_config: StrategyConfig | None = None,
     walk_config: WalkForwardConfig | None = None,
     strict_windows: bool = False,
@@ -217,7 +220,7 @@ def run_primetime_audit(
     export_smoke_ok = False
     artifact_smoke_ok = False
 
-    data_config = DataConfig(symbol=symbol, interval=interval, limit=limit)
+    data_config = DataConfig(symbol=symbol, interval=interval, limit=limit, provider=history_provider)
     model_config = ModelConfig(n_states=states)
     feature_columns = get_feature_columns(feature_pack)
     fetched = fetch_price_data(data_config)
@@ -240,7 +243,7 @@ def run_primetime_audit(
     confirmation_fetched = None
     confirmation_result = None
     if interval == "4hour" and active_strategy.require_daily_confirmation:
-        confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=limit)
+        confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=limit, provider=history_provider)
         confirmation_fetched = fetch_price_data(confirmation_data_config)
         confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
         confirmation_walk_config, _ = (
@@ -277,6 +280,7 @@ def run_primetime_audit(
             symbol=symbol,
             interval=interval,
             limit=limit,
+            history_provider=history_provider,
             feature_columns=feature_columns,
             model_config=model_config,
             strategy_config=replace(active_strategy, require_consensus_confirmation=False),
@@ -306,6 +310,7 @@ def run_primetime_audit(
         symbols=parse_symbol_list(robustness_symbols),
         interval=interval,
         limit=limit,
+        history_provider=history_provider,
         feature_columns=feature_columns,
         model_config=model_config,
         walk_config=effective_walk_config,
@@ -407,6 +412,8 @@ def run_primetime_audit(
         resolved_symbol=fetched.resolved_symbol,
         interval=interval,
         feature_pack=feature_pack,
+        historical_provider=fetched.provider,
+        historical_provider_note=fetched.provider_note,
         raw_rows=len(fetched.frame),
         usable_rows=len(feature_frame),
         walk_adjusted=was_adjusted,
@@ -442,6 +449,8 @@ def write_primetime_audit_report(
         "resolved_symbol": audit.resolved_symbol,
         "interval": audit.interval,
         "feature_pack": audit.feature_pack,
+        "historical_provider": audit.historical_provider,
+        "historical_provider_note": audit.historical_provider_note,
         "raw_rows": audit.raw_rows,
         "usable_rows": audit.usable_rows,
         "walk_adjusted": audit.walk_adjusted,
@@ -470,6 +479,8 @@ def write_primetime_audit_report(
         f"- Current action: **{audit.action_plan['action']}**",
         f"- Symbol / interval: `{audit.resolved_symbol}` / `{audit.interval}`",
         f"- Feature pack: `{audit.feature_pack}`",
+        f"- Historical provider: `{audit.historical_provider}`",
+        f"- Historical provider note: `{audit.historical_provider_note}`",
         f"- Raw rows: `{audit.raw_rows}`",
         f"- Usable rows: `{audit.usable_rows}`",
         f"- Walk adjusted: `{audit.walk_adjusted}`",
