@@ -681,6 +681,53 @@ elif live_engine["engine"] == "hmm_ensemble":
 else:
     st.caption("Live execution is intentionally flat because no engine is strong enough to justify deployment on this run.")
 
+engine_comparison_rows = [
+    {
+        "engine": "HMM Research",
+        "active": live_engine["engine"] == "hmm",
+        "action": execution_plan["action"],
+        "held_position": {1: "Long", 0: "Flat", -1: "Short"}.get(int(raw_hmm_latest_row.get("signal_position", 0)), "Flat"),
+        "sharpe": float(raw_hmm_result.metrics.get("sharpe", 0.0)),
+        "annualized_return": float(raw_hmm_result.metrics.get("annualized_return", 0.0)),
+        "trades": float(raw_hmm_result.metrics.get("trades", 0.0)),
+        "latest_guardrail": str(raw_hmm_latest_row.get("guardrail_reason", "") or "accepted"),
+        "notes": "Direct HMM output without consensus gating.",
+    },
+    {
+        "engine": "HMM Ensemble",
+        "active": live_engine["engine"] == "hmm_ensemble",
+        "action": ensemble_execution_plan["action"] if ensemble_result is not None else "Unavailable",
+        "held_position": (
+            {1: "Long", 0: "Flat", -1: "Short"}.get(int(ensemble_latest_row.get("signal_position", 0)), "Flat")
+            if ensemble_latest_row is not None
+            else "n/a"
+        ),
+        "sharpe": float(ensemble_result.metrics.get("sharpe", 0.0)) if ensemble_result is not None else float("nan"),
+        "annualized_return": float(ensemble_result.metrics.get("annualized_return", 0.0)) if ensemble_result is not None else float("nan"),
+        "trades": float(ensemble_result.metrics.get("trades", 0.0)) if ensemble_result is not None else float("nan"),
+        "latest_guardrail": str(ensemble_latest_row.get("guardrail_reason", "") or "accepted") if ensemble_latest_row is not None else "consensus_not_available",
+        "notes": "Consensus-filtered HMM that only acts when nearby seeds and state counts broadly agree." if ensemble_result is not None else "Run consensus diagnostics to evaluate the ensemble path.",
+    },
+]
+if best_baseline_name is not None and baseline_execution_plan is not None:
+    engine_comparison_rows.append(
+        {
+            "engine": f"Baseline ({baseline_display_name(best_baseline_name)})",
+            "active": live_engine["engine"] == "baseline",
+            "action": baseline_execution_plan["action"],
+            "held_position": baseline_execution_plan["held_position"],
+            "sharpe": float(best_baseline_row.get("sharpe", 0.0)),
+            "annualized_return": float(best_baseline_row.get("annualized_return", 0.0)),
+            "trades": float(best_baseline_row.get("trades", 0.0)),
+            "latest_guardrail": "baseline_rule",
+            "notes": "Strongest simple reference on the same blind-OOS slices.",
+        }
+    )
+engine_comparison = pd.DataFrame(engine_comparison_rows)
+st.subheader("Engine Comparison")
+st.dataframe(engine_comparison, use_container_width=True, hide_index=True)
+st.caption("This panel keeps the live choice honest by showing the raw HMM, the consensus-filtered HMM ensemble, and the strongest simple baseline side by side on the same stitched blind-OOS run.")
+
 research_metric_items = [
     ("HMM State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
     ("HMM Held", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),

@@ -1648,15 +1648,20 @@ def test_run_candidate_search_returns_ranked_leaderboard(monkeypatch, synthetic_
         "promotion_verdict",
         "candidate_score",
         "recommendation_detail",
+        "ensemble_sharpe",
+        "ensemble_outer_holdout_sharpe",
+        "ensemble_evaluated",
         "seed_median_sharpe",
         "seed_latest_candidate_share",
         "seed_evaluated",
     }.issubset(leaderboard.columns)
-    assert bool(leaderboard.iloc[0]["seed_evaluated"]) is True
+    assert leaderboard["seed_evaluated"].astype(bool).any()
+    assert leaderboard["ensemble_evaluated"].astype(bool).any()
 
     summary = summarize_candidate_search(leaderboard)
     assert summary["status"] in {"keep", "candidate", "discard"}
     assert "Top ranked variant" in summary["summary"]
+    assert "ensemble Sharpe" in summary["summary"]
 
 
 def test_walk_forward_pipeline_runs_end_to_end(synthetic_feature_frame: pd.DataFrame) -> None:

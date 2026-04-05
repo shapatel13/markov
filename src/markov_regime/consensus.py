@@ -267,6 +267,15 @@ def align_consensus_predictions(primary_predictions: pd.DataFrame, consensus_tim
             "member_count": "consensus_member_count",
         }
     )
+    for column, default_value in (
+        ("consensus_position", 0),
+        ("consensus_position_share", 0.0),
+        ("consensus_candidate", 0),
+        ("consensus_candidate_share", 0.0),
+        ("consensus_member_count", 0),
+    ):
+        if column not in right.columns:
+            right[column] = default_value
     merged = pd.merge_asof(
         primary_predictions.sort_values("timestamp"),
         right.loc[

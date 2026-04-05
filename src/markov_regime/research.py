@@ -96,6 +96,10 @@ CANDIDATE_SEARCH_COLUMNS: tuple[str, ...] = (
     "trades",
     "stability_score",
     "outer_holdout_sharpe",
+    "ensemble_sharpe",
+    "ensemble_outer_holdout_sharpe",
+    "ensemble_trades",
+    "ensemble_evaluated",
     "seed_median_sharpe",
     "seed_sharpe_std",
     "seed_median_stability",
@@ -484,6 +488,15 @@ def _empty_seed_metrics() -> dict[str, float | int | bool]:
     }
 
 
+def _empty_ensemble_metrics() -> dict[str, float | bool]:
+    return {
+        "ensemble_sharpe": float("nan"),
+        "ensemble_outer_holdout_sharpe": float("nan"),
+        "ensemble_trades": float("nan"),
+        "ensemble_evaluated": False,
+    }
+
+
 def _seed_robustness_metrics(consensus) -> dict[str, float | int | bool]:
     if consensus is None or consensus.members.empty or consensus.timeline.empty:
         return _empty_seed_metrics()
@@ -508,6 +521,7 @@ def _score_candidate(
     robustness: pd.DataFrame,
     nested_summary: dict[str, object] | None = None,
     seed_metrics: dict[str, float | int | bool] | None = None,
+    ensemble_metrics: dict[str, float | bool] | None = None,
 ) -> tuple[float, str, str, dict[str, float]]:
     bootstrap_lower, bootstrap_upper = _bootstrap_interval(result, "sharpe")
     stability = float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0
@@ -525,6 +539,11 @@ def _score_candidate(
     seed_avg_position_share = float(seed_context.get("seed_avg_position_share", float("nan")))
     seed_converged_ratio = float(seed_context.get("seed_converged_ratio", float("nan")))
     seed_evaluated = bool(seed_context.get("seed_evaluated", False))
+    ensemble_context = ensemble_metrics or _empty_ensemble_metrics()
+    ensemble_sharpe = float(ensemble_context.get("ensemble_sharpe", float("nan")))
+    ensemble_outer_holdout_sharpe = float(ensemble_context.get("ensemble_outer_holdout_sharpe", float("nan")))
+    ensemble_trades = float(ensemble_context.get("ensemble_trades", float("nan")))
+    ensemble_evaluated = bool(ensemble_context.get("ensemble_evaluated", False))
 
     score = float(result.metrics["sharpe"])
     score += 0.35 * bootstrap_lower
@@ -548,6 +567,12 @@ def _score_candidate(
         score -= 0.20 * seed_sharpe_std
     if seed_evaluated and pd.notna(seed_converged_ratio):
         score -= 0.30 * max(0.0, 1.0 - seed_converged_ratio)
+    if ensemble_evaluated and pd.notna(ensemble_sharpe):
+        score += 0.45 * ensemble_sharpe
+    if ensemble_evaluated and pd.notna(ensemble_outer_holdout_sharpe):
+        score += 0.30 * ensemble_outer_holdout_sharpe
+    if ensemble_evaluated and pd.notna(ensemble_trades) and ensemble_trades < 3:
+        score -= 0.25
     if result.metrics["trades"] < 3:
         score -= 0.75
     if bootstrap_lower <= 0.0:
@@ -584,6 +609,10 @@ def _score_candidate(
         notes.append("seed_performance_dispersion_high")
     if seed_evaluated and pd.notna(seed_converged_ratio) and seed_converged_ratio < 1.0:
         notes.append("partial_seed_convergence")
+    if ensemble_evaluated and pd.notna(ensemble_sharpe) and ensemble_sharpe <= 0.0:
+        notes.append("weak_ensemble_sharpe")
+    if ensemble_evaluated and pd.notna(ensemble_outer_holdout_sharpe) and ensemble_outer_holdout_sharpe <= 0.0:
+        notes.append("weak_ensemble_outer_holdout")
 
     seed_keep_ok = (
         not seed_evaluated
@@ -595,6 +624,19 @@ def _score_candidate(
             and (pd.isna(seed_converged_ratio) or seed_converged_ratio >= 0.95)
         )
     )
+    ensemble_keep_ok = (
+        not ensemble_evaluated
+        or (
+            pd.notna(ensemble_sharpe)
+            and ensemble_sharpe > 0.0
+            and (
+                pd.isna(ensemble_outer_holdout_sharpe)
+                or ensemble_outer_holdout_sharpe > 0.0
+                or not nested_summary
+                or nested_summary.get("status") != "ok"
+            )
+        )
+    )
     if (
         result.metrics["sharpe"] > 0.0
         and bootstrap_lower > 0.0
@@ -603,6 +645,7 @@ def _score_candidate(
         and (not nested_summary or nested_summary.get("status") != "ok" or outer_holdout_sharpe > 0.0)
         and (pd.isna(robustness_median) or robustness_median > 0.0)
         and seed_keep_ok
+        and ensemble_keep_ok
     ):
         status = "keep"
     elif result.metrics["sharpe"] > 0.0:
@@ -909,6 +952,7 @@ def run_candidate_search(
                     "trades": result.metrics["trades"],
                     "stability_score": float(result.state_stability["stability_score"].median()) if not result.state_stability.empty else 0.0,
                     "outer_holdout_sharpe": float(nested_summary.get("outer_holdout_sharpe", 0.0)),
+                    **_empty_ensemble_metrics(),
                     **_empty_seed_metrics(),
                     "robustness_median_sharpe": float("nan"),
                     "robustness_evaluated": False,
@@ -941,6 +985,7 @@ def run_candidate_search(
                     "trades": 0.0,
                     "stability_score": float("nan"),
                     "outer_holdout_sharpe": float("nan"),
+                    **_empty_ensemble_metrics(),
                     **_empty_seed_metrics(),
                     "robustness_median_sharpe": float("nan"),
                     "robustness_evaluated": False,
@@ -966,7 +1011,8 @@ def run_candidate_search(
     ).reset_index(drop=True)
     if robustness_top_k > 0 or seed_robustness_top_k > 0:
         top_k = min(max(int(robustness_top_k), int(seed_robustness_top_k)), len(leaderboard))
-        for row_index in range(top_k):
+
+        def _evaluate_leaderboard_row(row_index: int) -> None:
             row = leaderboard.iloc[row_index]
             context = contexts.get(
                 (
@@ -977,7 +1023,7 @@ def run_candidate_search(
                 )
             )
             if context is None:
-                continue
+                return
             result = context["result"]
             robustness = pd.DataFrame()
             robustness_was_evaluated = bool(row_index < int(robustness_top_k))
@@ -998,6 +1044,7 @@ def run_candidate_search(
                     robustness = pd.DataFrame()
                     robustness_was_evaluated = False
             seed_metrics = _empty_seed_metrics()
+            ensemble_metrics = _empty_ensemble_metrics()
             if row_index < int(seed_robustness_top_k):
                 try:
                     seed_consensus = run_consensus_diagnostics(
@@ -1012,8 +1059,33 @@ def run_candidate_search(
                         state_counts=(int(row["n_states"]),),
                     )
                     seed_metrics = _seed_robustness_metrics(seed_consensus)
+                    ensemble_strategy_config = replace(
+                        context["strategy_config"],
+                        require_consensus_confirmation=True,
+                        consensus_gate_mode="entry_only",
+                    )
+                    ensemble_result = apply_consensus_confirmation(
+                        result,
+                        seed_consensus,
+                        interval=interval,
+                        strategy_config=ensemble_strategy_config,
+                    )
+                    ensemble_nested_summary = nested_holdout_evaluation(
+                        predictions=ensemble_result.predictions,
+                        n_states=int(row["n_states"]),
+                        base_config=ensemble_strategy_config,
+                        interval=interval,
+                        outer_holdout_folds=1,
+                    )
+                    ensemble_metrics = {
+                        "ensemble_sharpe": float(ensemble_result.metrics.get("sharpe", float("nan"))),
+                        "ensemble_outer_holdout_sharpe": float(ensemble_nested_summary.get("outer_holdout_sharpe", float("nan"))),
+                        "ensemble_trades": float(ensemble_result.metrics.get("trades", float("nan"))),
+                        "ensemble_evaluated": True,
+                    }
                 except Exception:
                     seed_metrics = _empty_seed_metrics()
+                    ensemble_metrics = _empty_ensemble_metrics()
             nested_summary = nested_holdout_evaluation(
                 predictions=result.predictions,
                 n_states=int(row["n_states"]),
@@ -1021,7 +1093,13 @@ def run_candidate_search(
                 interval=interval,
                 outer_holdout_folds=1,
             )
-            candidate_score, candidate_status, notes, _ = _score_candidate(result, robustness, nested_summary, seed_metrics)
+            candidate_score, candidate_status, notes, _ = _score_candidate(
+                result,
+                robustness,
+                nested_summary,
+                seed_metrics,
+                ensemble_metrics,
+            )
             promotion_gates = build_promotion_gate_rows(
                 metrics=result.metrics,
                 bootstrap=result.bootstrap,
@@ -1043,6 +1121,8 @@ def run_candidate_search(
             ok_robustness = robustness.loc[robustness["status"] == "ok"] if "status" in robustness.columns else pd.DataFrame()
             robustness_median = float(ok_robustness["sharpe"].median()) if not ok_robustness.empty else float("nan")
             leaderboard.loc[row_index, "outer_holdout_sharpe"] = float(nested_summary.get("outer_holdout_sharpe", 0.0))
+            for key, value in ensemble_metrics.items():
+                leaderboard.loc[row_index, key] = value
             for key, value in seed_metrics.items():
                 leaderboard.loc[row_index, key] = value
             leaderboard.loc[row_index, "robustness_median_sharpe"] = robustness_median
@@ -1060,11 +1140,27 @@ def run_candidate_search(
                 note_parts.append("seed_robustness_not_evaluated")
             leaderboard.loc[row_index, "notes"] = ",".join(part for part in note_parts if part)
 
-        leaderboard = leaderboard.sort_values(
-            ["candidate_score", "sharpe", "outer_holdout_sharpe"],
-            ascending=[False, False, False],
-            kind="stable",
-        ).reset_index(drop=True)
+        for _ in range(len(leaderboard)):
+            for row_index in range(top_k):
+                needs_robustness = row_index < int(robustness_top_k) and not bool(leaderboard.iloc[row_index].get("robustness_evaluated", False))
+                needs_seed = row_index < int(seed_robustness_top_k) and not bool(leaderboard.iloc[row_index].get("seed_evaluated", False))
+                if needs_robustness or needs_seed:
+                    _evaluate_leaderboard_row(row_index)
+
+            leaderboard = leaderboard.sort_values(
+                ["candidate_score", "sharpe", "outer_holdout_sharpe"],
+                ascending=[False, False, False],
+                kind="stable",
+            ).reset_index(drop=True)
+            top_rows_ready = True
+            for row_index in range(top_k):
+                needs_robustness = row_index < int(robustness_top_k) and not bool(leaderboard.iloc[row_index].get("robustness_evaluated", False))
+                needs_seed = row_index < int(seed_robustness_top_k) and not bool(leaderboard.iloc[row_index].get("seed_evaluated", False))
+                if needs_robustness or needs_seed:
+                    top_rows_ready = False
+                    break
+            if top_rows_ready:
+                break
     leaderboard.insert(0, "rank", range(1, len(leaderboard) + 1))
     return leaderboard.loc[:, list(CANDIDATE_SEARCH_COLUMNS)]
 
@@ -1080,8 +1176,10 @@ def summarize_candidate_search(leaderboard: pd.DataFrame) -> dict[str, object]:
     best = leaderboard.iloc[0]
     seed_sharpe = float(best.get("seed_median_sharpe", float("nan")))
     seed_share = float(best.get("seed_latest_candidate_share", float("nan")))
+    ensemble_sharpe = float(best.get("ensemble_sharpe", float("nan")))
     seed_sharpe_text = f"{seed_sharpe:.2f}" if pd.notna(seed_sharpe) else "n/a"
     seed_share_text = f"{seed_share:.0%}" if pd.notna(seed_share) else "n/a"
+    ensemble_sharpe_text = f"{ensemble_sharpe:.2f}" if pd.notna(ensemble_sharpe) else "n/a"
     return {
         "status": str(best.get("candidate_status", "unknown")),
         "headline": str(best.get("engine_recommendation", "Candidate search complete")),
@@ -1089,6 +1187,7 @@ def summarize_candidate_search(leaderboard: pd.DataFrame) -> dict[str, object]:
             f"Top ranked variant is {best['feature_pack']} with {int(best['n_states'])} states, "
             f"{best['shorting_mode']}, and `{best['confirmation_mode']}` confirmation. "
             f"Sharpe {float(best['sharpe']):.2f}, outer holdout {float(best['outer_holdout_sharpe']):.2f}, "
+            f"ensemble Sharpe {ensemble_sharpe_text}, "
             f"robustness median {float(best['robustness_median_sharpe']):.2f}, "
             f"seed median Sharpe {seed_sharpe_text}, "
             f"latest seed candidate share {seed_share_text}. "
