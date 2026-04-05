@@ -9,6 +9,7 @@ from markov_regime.config import Interval, StrategyConfig, WalkForwardConfig
 POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
+    "live_engine_mode": "Controls what the top live recommendation follows. `auto` uses the promoted engine, `baseline` forces the strongest simple reference, and `hmm_research` forces the HMM even when it is not promoted.",
     "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline. Defaults now lean toward a 12-month train and 3-month blind test style on the higher timeframes.",
     "provider": "Historical bar source. `auto` keeps Financial Modeling Prep as the primary source, then uses Coinbase deep-history backfill only when FMP's intraday crypto sample is too short, with Yahoo only as a last-resort fallback.",
     "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
@@ -863,6 +864,61 @@ def recommend_strategy_engine(
         "headline": "Research further before promotion",
         "summary": "The current run is promising, but it still needs a cleaner edge over the baseline bar before promotion.",
         "best_baseline": baseline_name,
+    }
+
+
+def resolve_live_engine_mode(
+    *,
+    requested_mode: str,
+    engine_recommendation: Mapping[str, str],
+    best_baseline: str | None = None,
+) -> dict[str, str]:
+    requested = str(requested_mode or "auto")
+    recommended_engine = str(engine_recommendation.get("engine", "cash"))
+    baseline_name = best_baseline or str(engine_recommendation.get("best_baseline", "unavailable"))
+
+    if requested == "baseline":
+        if baseline_name and baseline_name != "unavailable":
+            return {
+                "engine": "baseline",
+                "mode": "baseline",
+                "headline": "Baseline Mode",
+                "summary": f"The live cards are following `{baseline_name}` directly, regardless of the current HMM promotion status.",
+            }
+        return {
+            "engine": "cash",
+            "mode": "baseline",
+            "headline": "Baseline Mode Unavailable",
+            "summary": "No usable baseline was available to force as the live engine, so the app is staying flat.",
+        }
+
+    if requested == "hmm_research":
+        return {
+            "engine": "hmm",
+            "mode": "hmm_research",
+            "headline": "HMM Research Mode",
+            "summary": "The live cards are following the HMM directly, even if it is not yet promoted. Treat the output as research-only.",
+        }
+
+    if recommended_engine == "hmm":
+        return {
+            "engine": "hmm",
+            "mode": "auto",
+            "headline": "Auto Mode -> HMM",
+            "summary": "The HMM cleared the current promotion logic, so the live cards are following the HMM.",
+        }
+    if recommended_engine == "baseline" and baseline_name and baseline_name != "unavailable":
+        return {
+            "engine": "baseline",
+            "mode": "auto",
+            "headline": "Auto Mode -> Baseline",
+            "summary": f"The HMM is still research-only on this run, so the live cards are following `{baseline_name}` instead.",
+        }
+    return {
+        "engine": "cash",
+        "mode": "auto",
+        "headline": "Auto Mode -> No Active Deployment",
+        "summary": "Neither the HMM nor the simple baselines are strong enough to justify an active live recommendation right now.",
     }
 
 

@@ -9,7 +9,12 @@ import pandas as pd
 import requests
 
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.baselines import build_daily_trend_filter_baseline, summarize_baselines
+from markov_regime.baselines import (
+    build_baseline_execution_plan,
+    build_daily_trend_filter_baseline,
+    select_best_baseline_frame,
+    summarize_baselines,
+)
 from markov_regime.bootstrap import block_bootstrap_confidence_intervals
 from markov_regime.consensus import (
     ConsensusDiagnostics,
@@ -30,6 +35,7 @@ from markov_regime.interpretation import (
     build_promotion_gate_rows,
     build_trust_snapshot,
     recommend_strategy_engine,
+    resolve_live_engine_mode,
     summarize_promotion_gates,
 )
 from markov_regime.research import (
@@ -772,6 +778,27 @@ def test_daily_trend_filter_baseline_uses_daily_context_when_available(synthetic
     assert baseline["guardrail_reason"].eq("daily_trend_filter").all()
 
 
+def test_select_best_baseline_frame_uses_supplied_leaderboard(synthetic_feature_frame: pd.DataFrame) -> None:
+    comparison = pd.DataFrame(
+        [
+            {"baseline": "ema_trend", "sharpe": 0.1},
+            {"baseline": "daily_breakout_filter", "sharpe": 0.4},
+        ]
+    )
+
+    baseline_name, best_row, baseline_frame = select_best_baseline_frame(
+        synthetic_feature_frame,
+        "4hour",
+        StrategyConfig(),
+        comparison,
+    )
+
+    assert baseline_name == "daily_breakout_filter"
+    assert best_row["baseline"] == "daily_breakout_filter"
+    assert not baseline_frame.empty
+    assert baseline_frame["baseline_name"].eq("daily_breakout_filter").all()
+
+
 def test_block_bootstrap_returns_major_metric_intervals() -> None:
     intervals = block_bootstrap_confidence_intervals(
         returns=[0.01, -0.005, 0.002, 0.003, -0.001] * 20,
@@ -1004,6 +1031,57 @@ def test_build_execution_plan_supports_hold_short() -> None:
     assert "already carrying short exposure" in plan["entry_guide"]
 
 
+def test_build_baseline_execution_plan_surfaces_long_entry_levels() -> None:
+    baseline_frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=2, freq="4h"),
+            "close": [100.0, 102.0],
+            "high": [101.0, 103.0],
+            "low": [99.0, 100.5],
+            "signal_position": [0, 1],
+            "entry_trigger": [100.5, 101.5],
+            "stop_level": [99.0, 98.5],
+        }
+    )
+
+    plan = build_baseline_execution_plan(
+        baseline_frame=baseline_frame,
+        baseline_name="daily_breakout_filter",
+        interval="4hour",
+        live_price=102.5,
+    )
+
+    assert plan["action"] == "Enter Long"
+    assert "101.50" in plan["entry_guide"]
+    assert "98.50" in plan["entry_guide"]
+    assert plan["engine_label"] == "Daily Breakout Filter"
+
+
+def test_build_baseline_execution_plan_respects_flat_wait_state() -> None:
+    baseline_frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=2, freq="4h"),
+            "close": [100.0, 100.5],
+            "high": [101.0, 101.0],
+            "low": [99.0, 99.5],
+            "signal_position": [0, 0],
+            "entry_trigger": [101.0, 101.2],
+            "stop_level": [99.0, 99.0],
+        }
+    )
+
+    plan = build_baseline_execution_plan(
+        baseline_frame=baseline_frame,
+        baseline_name="daily_breakout_filter",
+        interval="4hour",
+        live_price=100.7,
+    )
+
+    assert plan["action"] == "No Entry"
+    assert "101.20" in plan["entry_guide"]
+    assert "prefer flat" in plan["timing_note"].lower()
+
+
 def test_control_interpretation_describes_cautious_filters() -> None:
     rows = build_control_interpretation_rows(
         interval="4hour",
@@ -1078,6 +1156,29 @@ def test_recommend_strategy_engine_prefers_positive_baseline_when_hmm_not_promot
     assert recommendation["engine"] == "baseline"
     assert recommendation["headline"] == "Use baseline, not HMM"
     assert "atr_trend" in recommendation["summary"]
+
+
+def test_resolve_live_engine_mode_routes_auto_to_baseline() -> None:
+    resolved = resolve_live_engine_mode(
+        requested_mode="auto",
+        engine_recommendation={"engine": "baseline", "best_baseline": "daily_breakout_filter"},
+        best_baseline="daily_breakout_filter",
+    )
+
+    assert resolved["engine"] == "baseline"
+    assert "Auto Mode" in resolved["headline"]
+    assert "daily_breakout_filter" in resolved["summary"]
+
+
+def test_resolve_live_engine_mode_forces_hmm_research() -> None:
+    resolved = resolve_live_engine_mode(
+        requested_mode="hmm_research",
+        engine_recommendation={"engine": "baseline", "best_baseline": "daily_breakout_filter"},
+        best_baseline="daily_breakout_filter",
+    )
+
+    assert resolved["engine"] == "hmm"
+    assert resolved["mode"] == "hmm_research"
 
 
 def test_platform_gates_fail_on_stale_quote() -> None:

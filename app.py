@@ -14,6 +14,7 @@ if str(SRC_PATH) not in sys.path:
 
 from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.artifacts import write_run_artifact_bundle
+from markov_regime.baselines import baseline_display_name, build_baseline_execution_plan, select_best_baseline_frame
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import fetch_live_quote, fetch_price_data
@@ -27,6 +28,7 @@ from markov_regime.interpretation import (
     build_trust_snapshot,
     first_sentence,
     recommend_strategy_engine,
+    resolve_live_engine_mode,
     summarize_promotion_gates,
 )
 from markov_regime.research import (
@@ -115,6 +117,24 @@ def _provider_label(option: str) -> str:
         "yahoo": "yahoo (fallback only)",
     }
     return labels.get(option, option)
+
+
+def _engine_mode_label(option: str) -> str:
+    labels = {
+        "auto": "auto (follow promoted engine)",
+        "baseline": "baseline (force strongest simple reference)",
+        "hmm_research": "hmm_research (force HMM research output)",
+    }
+    return labels.get(option, option)
+
+
+engine_mode = st.sidebar.selectbox(
+    "Live engine mode",
+    options=["auto", "baseline", "hmm_research"],
+    index=0,
+    format_func=_engine_mode_label,
+    help=CONTROL_HELP["live_engine_mode"],
+)
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
@@ -513,33 +533,71 @@ engine_recommendation = recommend_strategy_engine(
     baseline_comparison=selected_result.baseline_comparison,
     promotion_summary=promotion_snapshot,
 )
+best_baseline_name, best_baseline_row, best_baseline_frame = select_best_baseline_frame(
+    selected_result.predictions,
+    analysis["interval"],
+    analysis["strategy_config"],
+    selected_result.baseline_comparison,
+)
+live_engine = resolve_live_engine_mode(
+    requested_mode=engine_mode,
+    engine_recommendation=engine_recommendation,
+    best_baseline=best_baseline_name,
+)
+baseline_execution_plan = (
+    build_baseline_execution_plan(
+        baseline_frame=best_baseline_frame,
+        baseline_name=best_baseline_name,
+        interval=analysis["interval"],
+        live_price=float(live_quote.price) if live_quote is not None else None,
+    )
+    if best_baseline_name is not None
+    else None
+)
+
+if live_engine["engine"] == "baseline" and baseline_execution_plan is not None:
+    active_execution_plan = baseline_execution_plan
+    active_engine_name = baseline_execution_plan["engine_label"]
+    active_held_position = baseline_execution_plan["held_position"]
+    active_sharpe = float(best_baseline_row.get("sharpe", 0.0))
+    active_annualized_return = float(best_baseline_row.get("annualized_return", 0.0))
+elif live_engine["engine"] == "hmm":
+    active_execution_plan = execution_plan
+    active_engine_name = f"HMM ({analysis['feature_pack']}, {analysis['model_config'].n_states} states)"
+    active_held_position = {1: "Long", 0: "Flat", -1: "Short"}.get(int(latest_row.get("signal_position", 0)), "Flat")
+    active_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
+    active_annualized_return = float(selected_result.metrics.get("annualized_return", 0.0))
+else:
+    active_execution_plan = {
+        "action": "No Active Deployment",
+        "severity": "warning",
+        "summary": "Neither the HMM nor the simple baselines are strong enough to justify a live recommendation right now.",
+        "entry_guide": "Stay flat until either the promoted baseline or the HMM clears the current gates.",
+        "timing_note": "The app is intentionally preferring capital preservation over a marginal signal.",
+        "held_position": "Flat",
+        "engine_label": "Cash / No Deployment",
+    }
+    active_engine_name = "Cash / No Deployment"
+    active_held_position = "Flat"
+    candidate_sharpes = [float(selected_result.metrics.get("sharpe", 0.0))]
+    if not best_baseline_row.empty:
+        candidate_sharpes.append(float(best_baseline_row.get("sharpe", 0.0)))
+    active_sharpe = max(candidate_sharpes)
+    active_annualized_return = 0.0
+
 candidate_search_results = analysis.get("candidate_search_results", pd.DataFrame())
 candidate_search_summary = analysis.get("candidate_search_summary", {})
 metric_lookup = metric_interpretation.set_index("metric")
 
-metric_items = [
-    ("Action Now", execution_plan["action"], first_sentence(execution_plan["summary"])),
-    ("Current State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
-    ("Held Position", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),
-    ("Latest Candidate", str(metric_lookup.loc["Latest Candidate", "value"]), first_sentence(str(metric_lookup.loc["Latest Candidate", "interpretation"]))),
+live_metric_items = [
+    ("Live Engine", active_engine_name, first_sentence(live_engine["summary"])),
+    ("Action Now", active_execution_plan["action"], first_sentence(active_execution_plan["summary"])),
+    ("Held Position", active_held_position, "This is the position the selected live engine is currently carrying."),
+    ("Engine Sharpe", f"{active_sharpe:.2f}", "This comes from the currently selected live engine, not always the HMM."),
+    ("Ann. Return", f"{active_annualized_return:.1%}", "Annualized return for the selected live engine on the stitched blind-OOS sample."),
 ]
-if "Daily Confirmation" in metric_lookup.index:
-    metric_items.append(
-        ("Daily Confirmation", str(metric_lookup.loc["Daily Confirmation", "value"]), first_sentence(str(metric_lookup.loc["Daily Confirmation", "interpretation"])))
-    )
-if "Consensus Filter" in metric_lookup.index:
-    metric_items.append(
-        ("Consensus", str(metric_lookup.loc["Consensus Filter", "value"]), first_sentence(str(metric_lookup.loc["Consensus Filter", "interpretation"])))
-    )
-metric_items.extend(
-    [
-    ("Posterior", str(metric_lookup.loc["Posterior", "value"]), first_sentence(str(metric_lookup.loc["Posterior", "interpretation"]))),
-    ("Sharpe", str(metric_lookup.loc["Sharpe", "value"]), first_sentence(str(metric_lookup.loc["Sharpe", "interpretation"]))),
-    ("Ann. Return", str(metric_lookup.loc["Annualized Return", "value"]), first_sentence(str(metric_lookup.loc["Annualized Return", "interpretation"]))),
-    ]
-)
-metrics_columns = st.columns(len(metric_items))
-for column, (label, value, note) in zip(metrics_columns, metric_items, strict=True):
+live_metrics_columns = st.columns(len(live_metric_items))
+for column, (label, value, note) in zip(live_metrics_columns, live_metric_items, strict=True):
     column.markdown(
         (
             "<div class='metric-card'>"
@@ -564,20 +622,57 @@ elif engine_recommendation["severity"] == "info":
 else:
     st.warning(f"{engine_recommendation['headline']}: {engine_recommendation['summary']}")
 
-if execution_plan["severity"] == "success":
-    st.success(f"{execution_plan['action']}: {execution_plan['summary']}")
-else:
-    st.warning(f"{execution_plan['action']}: {execution_plan['summary']}")
-st.caption(execution_plan["entry_guide"])
-st.caption(execution_plan["timing_note"])
+st.info(f"{live_engine['headline']}: {live_engine['summary']}")
 
-st.caption("Held Position shows the active book. Latest Candidate shows what the newest bar alone supports before hold and cooldown mechanics are applied.")
-if analysis["confirmation_enabled"]:
-    st.caption("Daily Confirmation shows whether the slower daily lane currently confirms, blocks, or stays neutral on the 4H trade.")
-if analysis["strategy_config"].require_consensus_confirmation:
-    st.caption("Consensus Filter shows whether nearby seeds and state counts agree strongly enough with the current direction to allow exposure.")
-if analysis["strategy_config"].allow_short:
-    st.caption("Shorts are enabled, so bearish validated regimes can surface as `Enter Short` or `Hold Short` instead of only flattening exposure.")
+if active_execution_plan["severity"] == "success":
+    st.success(f"{active_execution_plan['action']}: {active_execution_plan['summary']}")
+else:
+    st.warning(f"{active_execution_plan['action']}: {active_execution_plan['summary']}")
+st.caption(active_execution_plan["entry_guide"])
+st.caption(active_execution_plan["timing_note"])
+
+if live_engine["engine"] == "baseline" and best_baseline_name is not None:
+    st.caption(
+        f"Live execution is currently following the promoted baseline `{best_baseline_name}`. "
+        "The HMM cards below remain available as research diagnostics."
+    )
+elif live_engine["engine"] == "hmm":
+    st.caption("Live execution is currently following the HMM research engine because it is the selected or promoted path for this run.")
+else:
+    st.caption("Live execution is intentionally flat because no engine is strong enough to justify deployment on this run.")
+
+research_metric_items = [
+    ("HMM State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
+    ("HMM Held", str(metric_lookup.loc["Held Position", "value"]), first_sentence(str(metric_lookup.loc["Held Position", "interpretation"]))),
+    ("HMM Candidate", str(metric_lookup.loc["Latest Candidate", "value"]), first_sentence(str(metric_lookup.loc["Latest Candidate", "interpretation"]))),
+]
+if "Daily Confirmation" in metric_lookup.index:
+    research_metric_items.append(
+        ("Daily Confirmation", str(metric_lookup.loc["Daily Confirmation", "value"]), first_sentence(str(metric_lookup.loc["Daily Confirmation", "interpretation"])))
+    )
+if "Consensus Filter" in metric_lookup.index:
+    research_metric_items.append(
+        ("Consensus", str(metric_lookup.loc["Consensus Filter", "value"]), first_sentence(str(metric_lookup.loc["Consensus Filter", "interpretation"])))
+    )
+research_metric_items.extend(
+    [
+        ("HMM Posterior", str(metric_lookup.loc["Posterior", "value"]), first_sentence(str(metric_lookup.loc["Posterior", "interpretation"]))),
+        ("HMM Sharpe", str(metric_lookup.loc["Sharpe", "value"]), first_sentence(str(metric_lookup.loc["Sharpe", "interpretation"]))),
+        ("HMM Ann. Return", str(metric_lookup.loc["Annualized Return", "value"]), first_sentence(str(metric_lookup.loc["Annualized Return", "interpretation"]))),
+    ]
+)
+st.caption("HMM research diagnostics below show what the regime model itself believes, even when the selected live engine is a simpler promoted baseline.")
+research_columns = st.columns(len(research_metric_items))
+for column, (label, value, note) in zip(research_columns, research_metric_items, strict=True):
+    column.markdown(
+        (
+            "<div class='metric-card'>"
+            f"<strong>{label}</strong><br><span style='font-size:1.35rem'>{value}</span>"
+            f"<br><span style='font-size:0.82rem;color:#475569'>{note}</span></div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
 st.caption("Headline metrics are stitched only from blind test windows. Training and validation slices are excluded from performance totals.")
 st.caption(
     f"Latest guardrail status: `{guardrail_text}` | Historical provider: `{_provider_label(str(analysis.get('data_provider', 'n/a')))}` | Data request: `{analysis['data_url']}`"
@@ -657,12 +752,13 @@ with overview_tab:
         st.plotly_chart(plot_equity_curve(selected_result.predictions), use_container_width=True)
         st.plotly_chart(plot_regime_timeline(selected_result.predictions), use_container_width=True)
     with right:
-        metric_frame = pd.DataFrame(
-            {
-                "strategy": pd.Series(selected_result.metrics),
-                "buy_and_hold": pd.Series(selected_result.benchmark_metrics),
-            }
-        )
+        metric_sources: dict[str, pd.Series] = {
+            "hmm_strategy": pd.Series(selected_result.metrics),
+            "buy_and_hold": pd.Series(selected_result.benchmark_metrics),
+        }
+        if not best_baseline_row.empty:
+            metric_sources[f"best_baseline ({best_baseline_name})"] = pd.Series(best_baseline_row.to_dict())
+        metric_frame = pd.DataFrame(metric_sources)
         st.dataframe(metric_frame, use_container_width=True)
         st.plotly_chart(plot_guardrail_summary(selected_result.guardrail_summary), use_container_width=True)
         st.plotly_chart(plot_cost_stress(selected_result.cost_stress), use_container_width=True)
@@ -682,8 +778,6 @@ with trades_tab:
 
 with baselines_tab:
     if not selected_result.baseline_comparison.empty:
-        best_baseline_row = selected_result.baseline_comparison.iloc[0]
-        best_baseline_name = str(best_baseline_row["baseline"])
         best_baseline_sharpe = float(best_baseline_row["sharpe"])
         strategy_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
         if engine_recommendation["engine"] == "baseline":
@@ -698,6 +792,25 @@ with baselines_tab:
             st.warning(
                 f"Best simple baseline right now is `{best_baseline_name}` with Sharpe {best_baseline_sharpe:.2f}. The HMM needs to beat that bar to justify its complexity."
             )
+        if baseline_execution_plan is not None:
+            baseline_cards = st.columns(4)
+            baseline_card_items = [
+                ("Baseline Engine", baseline_display_name(best_baseline_name), "This is the strongest simple reference on the current stitched blind-OOS run."),
+                ("Baseline Action", baseline_execution_plan["action"], first_sentence(baseline_execution_plan["summary"])),
+                ("Baseline Held", baseline_execution_plan["held_position"], "This is the position the baseline itself is currently carrying."),
+                ("Baseline Sharpe", f"{best_baseline_sharpe:.2f}", "Current Sharpe for the strongest simple baseline on the same out-of-sample slices."),
+            ]
+            for column, (label, value, note) in zip(baseline_cards, baseline_card_items, strict=True):
+                column.markdown(
+                    (
+                        "<div class='metric-card'>"
+                        f"<strong>{label}</strong><br><span style='font-size:1.2rem'>{value}</span>"
+                        f"<br><span style='font-size:0.82rem;color:#475569'>{note}</span></div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+            st.caption(baseline_execution_plan["entry_guide"])
+            st.caption(baseline_execution_plan["timing_note"])
     st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
     st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
     st.caption("These are simpler reference systems on the same out-of-sample slices, including tougher ATR and daily-trend references. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
@@ -791,6 +904,16 @@ with methodology_tab:
                 "component": "Current Engine Recommendation",
                 "value": engine_recommendation["headline"],
                 "interpretation": engine_recommendation["summary"],
+            },
+            {
+                "component": "Live Engine Mode",
+                "value": _engine_mode_label(engine_mode),
+                "interpretation": live_engine["summary"],
+            },
+            {
+                "component": "Active Live Engine",
+                "value": active_engine_name,
+                "interpretation": active_execution_plan["summary"],
             },
         ]
     )
