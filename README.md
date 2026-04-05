@@ -4,7 +4,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 
 ## What It Does
 
-- Fetches live quotes and recent bars from Financial Modeling Prep, and can automatically backfill deeper crypto intraday history from Coinbase or Yahoo when FMP's hourly cap would starve the walk-forward test.
+- Fetches live quotes and recent bars from Financial Modeling Prep, and can automatically backfill deeper crypto intraday history from Coinbase only when FMP's hourly cap would starve the walk-forward test, with Yahoo reserved as a last-resort fallback.
 - Builds multiple feature packs spanning return, trend, volatility, range, EMA distance, compression, ADX/DI trend strength, RSI/Bollinger mean reversion, Donchian breakout context, rolling VWAP gap, realized skew/kurtosis structure, and a causal ATR-normalized momentum lane.
 - Runs explicit purged train / validate / embargo / test walk-forward retraining with rolling refits.
 - Stitches performance only from the blind test slices and keeps train / validate periods out of headline return metrics.
@@ -19,7 +19,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Checks robustness across a multi-asset basket instead of only the primary symbol.
 - Exports the signal history as both CSV and JSON.
 - Benchmarks the HMM against tougher simple references including ATR trend, ATR breakout-stop, and daily-trend-filter baselines.
-- Adds a dedicated candidate-search workflow that ranks feature pack, state count, shorting mode, and confirmation mode on deeper Coinbase-backed crypto history.
+- Adds a dedicated candidate-search workflow that keeps FMP primary and ranks feature pack, state count, shorting mode, and confirmation mode on deeper backfilled crypto history only when needed.
 - Makes an explicit engine recommendation in the app: use the HMM, use the best simple baseline, or stay in research / flat mode.
 - Adds a constrained local `autoresearch` loop with a frozen evaluator, feature-pack candidates, `research_program.md`, local `results.tsv` logging, and artifact export for the best runs.
 
@@ -86,10 +86,10 @@ Compare feature packs on the same timeframe:
 python -m markov_regime compare-feature-packs --symbol BTCUSD --interval 4hour --states 8 --provider auto
 ```
 
-Rank serious HMM variants on deeper Coinbase-backed history:
+Rank serious HMM variants while keeping FMP primary and allowing deep-history backfill when needed:
 
 ```powershell
-python -m markov_regime candidate-search --symbol BTCUSD --interval 4hour --provider coinbase --limit 5000
+python -m markov_regime candidate-search --symbol BTCUSD --interval 4hour --provider auto --limit 5000
 ```
 
 Initialize the local autoresearch files:
@@ -129,7 +129,7 @@ python -m streamlit run app.py
 - The app now includes a dedicated `Methodology` panel showing the walk-forward schedule, current friction assumptions, and promotion gates for the active run.
 - That same `Methodology` panel now includes a nested holdout check, where inner folds choose sweep settings and the most recent untouched outer folds judge whether those settings still work.
 - The current exploratory default operating profile is `BTCUSD` on `4hour` with the `mean_reversion` feature pack, `8` states, and `auto` historical provider. This is a research preset, not a promoted live strategy.
-- In `auto` provider mode, the app keeps FMP for live quotes and will prefer Coinbase for long-history crypto intraday bars, with Yahoo as a backup if Coinbase is unavailable.
+- In `auto` provider mode, the app keeps FMP as the primary source for history and live quotes, uses Coinbase only as deep-history crypto backfill when FMP intraday history is too short, and falls back to Yahoo only if Coinbase is unavailable or insufficient.
 - The app now defaults to BTC `4hour`, with `1day` alongside it as a slower confirmation lane, because those higher timeframes tend to produce more stable regime structure than `1hour` noise.
 - The higher-timeframe defaults now approximate a `12 months train / 3 months validate / 3 months blind test` cadence on `4hour` and `1day`.
 - The daily lane is still available as slower context, but it is no longer a hard default veto because deeper-sample testing showed that the current best exploratory candidate did not improve when daily confirmation was forced on.
@@ -197,7 +197,7 @@ python -m streamlit run app.py
 
 ## Candidate Search
 
-- `python -m markov_regime candidate-search ...` ranks feature pack, state count, shorting mode, and confirmation mode on a deeper Coinbase-backed history lane.
+- `python -m markov_regime candidate-search ...` ranks feature pack, state count, shorting mode, and confirmation mode while keeping FMP primary and only backfilling deeper history when needed.
 - Candidate search is staged: it ranks all requested variants on the primary symbol first, then runs the heavier cross-asset robustness check only on the top-ranked variants.
 - The search score includes:
   - stitched blind-OOS Sharpe

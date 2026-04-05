@@ -206,7 +206,7 @@ def main() -> None:
     )
     candidate_parser.add_argument("--symbol", default="BTCUSD")
     candidate_parser.add_argument("--interval", choices=["4hour", "1day", "1hour"], default=DEFAULT_CLI_INTERVAL)
-    candidate_parser.add_argument("--provider", choices=["auto", "fmp", "coinbase", "yahoo"], default="coinbase")
+    candidate_parser.add_argument("--provider", choices=["auto", "fmp", "coinbase", "yahoo"], default="auto")
     candidate_parser.add_argument("--limit", type=int, default=5000)
     candidate_parser.add_argument("--feature-packs", default="mean_reversion,trend,baseline,regime_mix,atr_causal,trend_context")
     candidate_parser.add_argument("--state-counts", default="5,6,7,8,9")

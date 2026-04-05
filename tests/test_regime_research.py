@@ -384,6 +384,38 @@ def test_fetch_price_data_auto_falls_back_to_yahoo_for_thin_intraday_crypto() ->
     assert "query1.finance.yahoo.com" in result.source_url
 
 
+def test_fetch_price_data_auto_prefers_coinbase_backfill_before_yahoo() -> None:
+    fmp_response = _FakeResponse(
+        "https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=BTCUSD&apikey=%2A%2A%2A",
+        _fmp_hourly_payload(600),
+    )
+    coinbase_response = _FakeResponse(
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=3600&start=2025-01-01T00%3A00%3A00%2B00%3A00&end=2025-01-13T12%3A00%3A00%2B00%3A00",
+        _coinbase_payload(1300),
+    )
+    yahoo_response = _FakeResponse(
+        "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1h&range=730d",
+        _yahoo_chart_payload(1500),
+    )
+    session = _FakeSession(
+        {
+            "https://financialmodelingprep.com/stable/historical-chart/1hour": fmp_response,
+            "https://api.exchange.coinbase.com/products/BTC-USD/candles": coinbase_response,
+            "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD": yahoo_response,
+        }
+    )
+
+    result = fetch_price_data(
+        DataConfig(symbol="BTCUSD", interval="1hour", limit=1000, provider="auto"),
+        api_key="test-key",
+        session=session,
+    )
+
+    assert result.provider == "coinbase"
+    assert result.provider_note is not None
+    assert "primary source" in result.provider_note
+
+
 def test_fetch_price_data_respects_explicit_fmp_provider() -> None:
     fmp_response = _FakeResponse(
         "https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=BTCUSD&apikey=%2A%2A%2A",

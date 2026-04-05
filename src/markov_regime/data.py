@@ -509,31 +509,46 @@ def fetch_price_data(
     if not _should_try_long_history_fallback(fmp_result.frame, config, resolved_symbol):
         return fmp_result
 
-    fallback_results: list[DataFetchResult] = []
-    for fetcher in (_fetch_coinbase_price_data, _fetch_yahoo_price_data):
-        try:
-            fallback_results.append(fetcher(config=config, client=client, resolved_symbol=resolved_symbol))
-        except Exception:  # pragma: no cover - exercised only when a live fallback is unavailable
-            continue
+    coinbase_result: DataFetchResult | None = None
+    yahoo_result: DataFetchResult | None = None
+    try:
+        coinbase_result = _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+    except Exception:  # pragma: no cover - exercised only when a live fallback is unavailable
+        coinbase_result = None
 
-    if not fallback_results:
-        return fmp_result
+    if coinbase_result is not None and len(coinbase_result.frame) > len(fmp_result.frame):
+        return DataFetchResult(
+            frame=coinbase_result.frame,
+            source_url=coinbase_result.source_url,
+            requested_symbol=config.symbol,
+            resolved_symbol=resolved_symbol,
+            provider=coinbase_result.provider,
+            provider_note=(
+                f"Auto-kept Financial Modeling Prep as the primary source and switched to Coinbase deep-history backfill because "
+                f"FMP returned {len(fmp_result.frame)} usable `{config.interval}` rows, which is too thin for the requested research depth."
+            ),
+        )
 
-    best_fallback = max(fallback_results, key=lambda item: len(item.frame))
-    if len(best_fallback.frame) <= len(fmp_result.frame):
-        return fmp_result
+    try:
+        yahoo_result = _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+    except Exception:  # pragma: no cover - exercised only when a live fallback is unavailable
+        yahoo_result = None
 
-    return DataFetchResult(
-        frame=best_fallback.frame,
-        source_url=best_fallback.source_url,
-        requested_symbol=config.symbol,
-        resolved_symbol=resolved_symbol,
-        provider=best_fallback.provider,
-        provider_note=(
-            f"Auto-selected {best_fallback.provider.title()} long-history bars because Financial Modeling Prep returned "
-            f"{len(fmp_result.frame)} usable `{config.interval}` rows, which is too thin for the requested research depth."
-        ),
-    )
+    if yahoo_result is not None and len(yahoo_result.frame) > len(fmp_result.frame):
+        return DataFetchResult(
+            frame=yahoo_result.frame,
+            source_url=yahoo_result.source_url,
+            requested_symbol=config.symbol,
+            resolved_symbol=resolved_symbol,
+            provider=yahoo_result.provider,
+            provider_note=(
+                f"Auto-kept Financial Modeling Prep as the primary source and used Yahoo deep-history fallback because "
+                f"FMP returned {len(fmp_result.frame)} usable `{config.interval}` rows, which is too thin for the requested research depth, "
+                "and Coinbase backfill was unavailable or insufficient."
+            ),
+        )
+
+    return fmp_result
 
 
 def fetch_live_quote(
