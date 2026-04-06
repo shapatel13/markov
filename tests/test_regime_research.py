@@ -32,11 +32,13 @@ from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feat
 from markov_regime.interpretation import (
     build_control_interpretation_rows,
     build_execution_plan,
+    build_hmm_loss_breakdown,
     build_metric_interpretation_rows,
     build_promotion_gate_rows,
     build_trust_snapshot,
     recommend_strategy_engine,
     resolve_live_engine_mode,
+    summarize_hmm_loss_breakdown,
     summarize_promotion_gates,
 )
 from markov_regime.model import fit_hmm
@@ -1158,6 +1160,53 @@ def test_recommend_strategy_engine_prefers_positive_baseline_when_hmm_not_promot
     assert recommendation["engine"] == "baseline"
     assert recommendation["headline"] == "Use baseline, not HMM"
     assert "atr_trend" in recommendation["summary"]
+
+
+def test_build_hmm_loss_breakdown_calls_out_baseline_holdout_and_robustness() -> None:
+    breakdown = build_hmm_loss_breakdown(
+        strategy_metrics={"sharpe": -0.2, "trades": 3.0},
+        ensemble_metrics={"sharpe": 0.05, "trades": 2.0},
+        baseline_row={"baseline": "daily_breakout_filter", "sharpe": 0.6},
+        promotion_gates=pd.DataFrame(
+            [
+                {"gate": "Positive OOS Sharpe", "status": "fail", "detail": "negative"},
+                {"gate": "Cross-Asset Robustness", "status": "fail", "detail": "weak"},
+            ]
+        ),
+        nested_holdout={"status": "ok", "outer_holdout_sharpe": -0.4},
+        robustness=pd.DataFrame(
+            [
+                {"symbol": "BTCUSD", "status": "ok", "sharpe": -0.3},
+                {"symbol": "ETHUSD", "status": "ok", "sharpe": -0.5},
+            ]
+        ),
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -1.0, "upper": 0.8}]),
+    )
+    lookup = breakdown.set_index("factor")
+
+    assert lookup.loc["Baseline Bar", "status"] == "fail"
+    assert "daily_breakout_filter" in lookup.loc["Baseline Bar", "detail"]
+    assert lookup.loc["Outer Holdout", "status"] == "fail"
+    assert "did not confirm the edge" in lookup.loc["Outer Holdout", "detail"]
+    assert lookup.loc["Cross-Asset Robustness", "status"] == "fail"
+    assert "Failed promotion gates" in lookup.loc["Promotion Gates", "detail"]
+
+
+def test_summarize_hmm_loss_breakdown_surfaces_primary_blockers() -> None:
+    summary = summarize_hmm_loss_breakdown(
+        pd.DataFrame(
+            [
+                {"factor": "Baseline Bar", "status": "fail", "detail": "baseline won"},
+                {"factor": "Outer Holdout", "status": "fail", "detail": "holdout weak"},
+                {"factor": "Trade Count", "status": "ok", "detail": "enough trades"},
+            ]
+        )
+    )
+
+    assert summary["headline"] == "Why HMM Lost"
+    assert summary["severity"] == "warning"
+    assert "Baseline Bar" in summary["summary"]
+    assert "Outer Holdout" in summary["summary"]
 
 
 def test_resolve_live_engine_mode_routes_auto_to_baseline() -> None:

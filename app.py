@@ -23,12 +23,14 @@ from markov_regime.interpretation import (
     CONTROL_HELP,
     build_control_interpretation_rows,
     build_execution_plan,
+    build_hmm_loss_breakdown,
     build_metric_interpretation_rows,
     build_promotion_gate_rows,
     build_trust_snapshot,
     first_sentence,
     recommend_strategy_engine,
     resolve_live_engine_mode,
+    summarize_hmm_loss_breakdown,
     summarize_promotion_gates,
 )
 from markov_regime.research import (
@@ -586,6 +588,16 @@ baseline_execution_plan = (
     if best_baseline_name is not None
     else None
 )
+hmm_loss_breakdown = build_hmm_loss_breakdown(
+    strategy_metrics=selected_result.metrics,
+    ensemble_metrics=ensemble_result.metrics if ensemble_result is not None else None,
+    baseline_row=best_baseline_row.to_dict() if not best_baseline_row.empty else None,
+    promotion_gates=promotion_gates,
+    nested_holdout=nested_holdout,
+    robustness=robustness,
+    bootstrap=selected_result.bootstrap,
+)
+hmm_loss_summary = summarize_hmm_loss_breakdown(hmm_loss_breakdown)
 
 if live_engine["engine"] == "baseline" and baseline_execution_plan is not None:
     active_execution_plan = baseline_execution_plan
@@ -727,6 +739,15 @@ engine_comparison = pd.DataFrame(engine_comparison_rows)
 st.subheader("Engine Comparison")
 st.dataframe(engine_comparison, use_container_width=True, hide_index=True)
 st.caption("This panel keeps the live choice honest by showing the raw HMM, the consensus-filtered HMM ensemble, and the strongest simple baseline side by side on the same stitched blind-OOS run.")
+if engine_recommendation["engine"] != "hmm":
+    if hmm_loss_summary["severity"] == "success":
+        st.success(f"{hmm_loss_summary['headline']}: {hmm_loss_summary['summary']}")
+    elif hmm_loss_summary["severity"] == "warning":
+        st.warning(f"{hmm_loss_summary['headline']}: {hmm_loss_summary['summary']}")
+    else:
+        st.info(f"{hmm_loss_summary['headline']}: {hmm_loss_summary['summary']}")
+    st.dataframe(hmm_loss_breakdown, use_container_width=True, hide_index=True)
+    st.caption("This breakdown explains why the app routed the live seat away from the raw HMM on this run.")
 
 research_metric_items = [
     ("HMM State", str(metric_lookup.loc["Current State", "value"]), first_sentence(str(metric_lookup.loc["Current State", "interpretation"]))),
@@ -951,6 +972,10 @@ with interpretation_tab:
     st.subheader("Current Run Readout")
     st.dataframe(metric_interpretation, use_container_width=True, hide_index=True)
     st.caption("These explanations interpret the latest bar and the current backtest in plain English. They are heuristics for readability, not hard statistical proof.")
+    if engine_recommendation["engine"] != "hmm":
+        st.subheader("Why HMM Lost")
+        st.dataframe(hmm_loss_breakdown, use_container_width=True, hide_index=True)
+        st.caption("When the live engine routes to a baseline or to cash, this table shows the main blockers: baseline competition, holdout weakness, bootstrap fragility, robustness, trade count, and failed promotion gates.")
     st.subheader("Current Control Meanings")
     st.dataframe(control_interpretation, use_container_width=True, hide_index=True)
     st.caption("These rows explain what the current settings are encouraging the strategy to do, so you can tell whether results are coming from signal quality or just stricter filters.")

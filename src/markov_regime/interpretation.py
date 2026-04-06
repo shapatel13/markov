@@ -658,6 +658,252 @@ def build_metric_interpretation_rows(
     return pd.DataFrame(rows)
 
 
+def build_hmm_loss_breakdown(
+    *,
+    strategy_metrics: Mapping[str, float],
+    ensemble_metrics: Mapping[str, float] | None,
+    baseline_row: Mapping[str, Any] | None,
+    promotion_gates: pd.DataFrame,
+    nested_holdout: Mapping[str, Any] | None = None,
+    robustness: pd.DataFrame | None = None,
+    bootstrap: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    strategy_sharpe = float(strategy_metrics.get("sharpe", 0.0))
+    strategy_trades = float(strategy_metrics.get("trades", 0.0))
+    robustness_median = _median_robustness_sharpe(robustness if robustness is not None else pd.DataFrame())
+    sharpe_lower, sharpe_upper = _bootstrap_interval(bootstrap if bootstrap is not None else pd.DataFrame(), "sharpe")
+    nested_status = str((nested_holdout or {}).get("status", "unavailable"))
+    outer_holdout_sharpe = float((nested_holdout or {}).get("outer_holdout_sharpe", 0.0)) if nested_status == "ok" else None
+
+    baseline_name = "unavailable"
+    baseline_sharpe = None
+    if baseline_row is not None:
+        baseline_name = str(baseline_row.get("baseline", "baseline"))
+        baseline_sharpe_raw = baseline_row.get("sharpe")
+        baseline_sharpe = float(baseline_sharpe_raw) if baseline_sharpe_raw is not None else None
+
+    ensemble_sharpe = None
+    ensemble_trades = None
+    if ensemble_metrics is not None:
+        ensemble_sharpe = float(ensemble_metrics.get("sharpe", 0.0))
+        ensemble_trades = float(ensemble_metrics.get("trades", 0.0))
+
+    failed_gates = (
+        promotion_gates.loc[promotion_gates["status"] == "fail", "gate"].tolist()
+        if not promotion_gates.empty and {"status", "gate"}.issubset(promotion_gates.columns)
+        else []
+    )
+
+    rows: list[dict[str, str]] = []
+
+    if baseline_sharpe is None:
+        rows.append(
+            {
+                "factor": "Baseline Bar",
+                "status": "info",
+                "detail": "No baseline comparison was available, so the HMM was judged without a simple reference bar.",
+            }
+        )
+    elif strategy_sharpe > baseline_sharpe:
+        rows.append(
+            {
+                "factor": "Baseline Bar",
+                "status": "ok",
+                "detail": f"The raw HMM beat `{baseline_name}` on Sharpe ({strategy_sharpe:.2f} vs {baseline_sharpe:.2f}), so baseline competition was not the blocker.",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Baseline Bar",
+                "status": "fail",
+                "detail": f"The strongest simple baseline `{baseline_name}` still beat the raw HMM on Sharpe ({baseline_sharpe:.2f} vs {strategy_sharpe:.2f}).",
+            }
+        )
+
+    if ensemble_sharpe is None:
+        rows.append(
+            {
+                "factor": "Ensemble Check",
+                "status": "info",
+                "detail": "The consensus-filtered HMM ensemble was not evaluated on this run.",
+            }
+        )
+    elif baseline_sharpe is not None and ensemble_sharpe > baseline_sharpe and ensemble_sharpe > 0.0:
+        rows.append(
+            {
+                "factor": "Ensemble Check",
+                "status": "ok",
+                "detail": f"The consensus-filtered HMM improved enough to clear the baseline bar ({ensemble_sharpe:.2f} vs {baseline_sharpe:.2f}).",
+            }
+        )
+    elif ensemble_sharpe > strategy_sharpe:
+        rows.append(
+            {
+                "factor": "Ensemble Check",
+                "status": "warning",
+                "detail": (
+                    f"Consensus improved the raw HMM ({ensemble_sharpe:.2f} vs {strategy_sharpe:.2f})"
+                    + (
+                        f", but it still trailed `{baseline_name}` at {baseline_sharpe:.2f}."
+                        if baseline_sharpe is not None
+                        else "."
+                    )
+                ),
+            }
+        )
+    else:
+        ensemble_trade_text = f" with only {ensemble_trades:.0f} trades" if ensemble_trades is not None else ""
+        rows.append(
+            {
+                "factor": "Ensemble Check",
+                "status": "fail",
+                "detail": f"The consensus-filtered HMM did not rescue the edge ({ensemble_sharpe:.2f} Sharpe{ensemble_trade_text}).",
+            }
+        )
+
+    if outer_holdout_sharpe is None:
+        rows.append(
+            {
+                "factor": "Outer Holdout",
+                "status": "fail",
+                "detail": "There was no clean nested outer holdout left after inner selection, so the sweep could not be blindly confirmed.",
+            }
+        )
+    elif outer_holdout_sharpe > 0.0:
+        rows.append(
+            {
+                "factor": "Outer Holdout",
+                "status": "ok",
+                "detail": f"The untouched outer holdout stayed positive at {outer_holdout_sharpe:.2f} Sharpe.",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Outer Holdout",
+                "status": "fail",
+                "detail": f"The untouched outer holdout did not confirm the edge ({outer_holdout_sharpe:.2f} Sharpe).",
+            }
+        )
+
+    if sharpe_lower is None or sharpe_upper is None:
+        rows.append(
+            {
+                "factor": "Bootstrap Support",
+                "status": "info",
+                "detail": "No Sharpe bootstrap interval was available for this run.",
+            }
+        )
+    elif sharpe_lower > 0.0:
+        rows.append(
+            {
+                "factor": "Bootstrap Support",
+                "status": "ok",
+                "detail": f"The bootstrap Sharpe interval stayed above zero ({sharpe_lower:.2f} to {sharpe_upper:.2f}).",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Bootstrap Support",
+                "status": "fail",
+                "detail": f"The bootstrap Sharpe interval still crossed zero ({sharpe_lower:.2f} to {sharpe_upper:.2f}).",
+            }
+        )
+
+    if robustness_median is None:
+        rows.append(
+            {
+                "factor": "Cross-Asset Robustness",
+                "status": "info",
+                "detail": "No successful robustness basket run was available.",
+            }
+        )
+    elif robustness_median > 0.0:
+        rows.append(
+            {
+                "factor": "Cross-Asset Robustness",
+                "status": "ok",
+                "detail": f"The median BTC/ETH/SOL robustness Sharpe stayed positive at {robustness_median:.2f}.",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Cross-Asset Robustness",
+                "status": "fail",
+                "detail": f"The median BTC/ETH/SOL robustness Sharpe was weak at {robustness_median:.2f}.",
+            }
+        )
+
+    if strategy_trades >= 5:
+        rows.append(
+            {
+                "factor": "Trade Count",
+                "status": "ok",
+                "detail": f"The HMM produced {strategy_trades:.0f} trades, which is enough to be more than a one-trade anecdote.",
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Trade Count",
+                "status": "fail",
+                "detail": f"The HMM only produced {strategy_trades:.0f} trades, so a small number of outcomes can dominate the result.",
+            }
+        )
+
+    if failed_gates:
+        rows.append(
+            {
+                "factor": "Promotion Gates",
+                "status": "fail",
+                "detail": "Failed promotion gates: " + ", ".join(failed_gates[:5]) + ("." if len(failed_gates) <= 5 else ", ..."),
+            }
+        )
+    else:
+        rows.append(
+            {
+                "factor": "Promotion Gates",
+                "status": "ok",
+                "detail": "The run cleared every promotion gate.",
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_hmm_loss_breakdown(breakdown: pd.DataFrame) -> dict[str, str]:
+    if breakdown.empty:
+        return {
+            "headline": "Why HMM Lost",
+            "severity": "info",
+            "summary": "No HMM loss breakdown was available for this run.",
+        }
+
+    failed = breakdown.loc[breakdown["status"] == "fail", "factor"].tolist() if "status" in breakdown.columns else []
+    warnings = breakdown.loc[breakdown["status"] == "warning", "factor"].tolist() if "status" in breakdown.columns else []
+    primary = failed[:3] if failed else warnings[:2]
+    reason_text = ", ".join(primary) if primary else "no major blockers were recorded"
+
+    if failed:
+        severity = "warning"
+        summary = f"The HMM lost the live seat mainly because of: {reason_text}."
+    elif warnings:
+        severity = "info"
+        summary = f"The HMM is close, but still needs work around: {reason_text}."
+    else:
+        severity = "success"
+        summary = "The HMM did not lose on the major quality checks tracked here."
+
+    return {
+        "headline": "Why HMM Lost",
+        "severity": severity,
+        "summary": summary,
+    }
+
+
 def build_promotion_gate_rows(
     *,
     metrics: Mapping[str, float],
