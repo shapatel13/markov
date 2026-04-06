@@ -19,13 +19,18 @@ from markov_regime.config import (
     SweepConfig,
     WalkForwardConfig,
     asset_class_label,
+    describe_robustness_basket,
     default_asset_settings,
-    default_robustness_basket,
     default_walk_forward_config,
     infer_asset_class,
 )
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.baselines import baseline_display_name, build_baseline_execution_plan, select_best_baseline_frame
+from markov_regime.baselines import (
+    baseline_display_name,
+    build_baseline_execution_plan,
+    describe_live_baseline_universe,
+    select_best_baseline_frame,
+)
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.data import fetch_live_quote, fetch_price_data
@@ -196,10 +201,12 @@ if "symbol_input" not in st.session_state:
 feature_pack_options = list(list_feature_packs())
 current_asset_class = _apply_asset_aware_sidebar_defaults(feature_pack_options) if auto_asset_defaults else infer_asset_class(str(st.session_state.get("symbol_input", "BTCUSD")))
 asset_defaults = default_asset_settings(str(st.session_state.get("symbol_input", "BTCUSD") or "BTCUSD"))
+default_basket, default_basket_reason = describe_robustness_basket(str(st.session_state.get("symbol_input", "BTCUSD") or "BTCUSD"), current_asset_class)
 st.sidebar.caption(
     f"Detected asset class: {asset_class_label(current_asset_class)}. "
-    f"Auto profile favors `{asset_defaults.interval}` with `{asset_defaults.feature_pack}` and robustness basket `{', '.join(asset_defaults.robustness_symbols)}`."
+    f"Auto profile favors `{asset_defaults.interval}` with `{asset_defaults.feature_pack}` and robustness basket `{', '.join(default_basket)}`."
 )
+st.sidebar.caption(default_basket_reason)
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
@@ -291,6 +298,13 @@ if run_clicked:
                 slippage_bps=slippage_bps,
                 impact_bps=impact_bps,
             )
+            effective_robustness_symbols = tuple(parse_symbol_list(robustness_symbols))
+            default_run_basket, default_run_basket_reason = describe_robustness_basket(symbol, current_asset_class)
+            robustness_basket_note = (
+                default_run_basket_reason
+                if effective_robustness_symbols == default_run_basket
+                else "Custom robustness basket override is active for this run, so the app is using your manual symbol list instead of the default asset-aware peer map."
+            )
             execution_strategy_config = strategy_config
             model_strategy_config = replace(strategy_config, require_daily_confirmation=False, require_consensus_confirmation=False)
             fetched = fetch_price_data(data_config)
@@ -349,7 +363,7 @@ if run_clicked:
                 interval=data_config.interval,
             )
             robustness = run_multi_asset_robustness(
-                symbols=parse_symbol_list(robustness_symbols),
+                symbols=effective_robustness_symbols,
                 interval=data_config.interval,
                 limit=int(limit),
                 history_provider=history_provider,
@@ -456,7 +470,7 @@ if run_clicked:
                     state_counts=(5, 6, 7, 8, 9),
                     short_modes=(False, True),
                     confirmation_modes=("off", "daily", "consensus_entry", "daily_consensus_entry"),
-                    robustness_symbols=tuple(parse_symbol_list(robustness_symbols)),
+                    robustness_symbols=effective_robustness_symbols,
                     auto_adjust_windows=auto_adjust_windows,
                     max_candidates=int(candidate_search_max),
                     seed_robustness_top_k=min(2, int(candidate_search_max)),
@@ -515,6 +529,8 @@ if run_clicked:
                 "confirmation_result": confirmation_result,
                 "confirmation_data_url": confirmation_fetched.source_url if confirmation_fetched is not None else "",
                 "confirmation_data_provider": confirmation_fetched.provider if confirmation_fetched is not None else "",
+                "robustness_symbols": effective_robustness_symbols,
+                "robustness_basket_note": robustness_basket_note,
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
@@ -636,6 +652,7 @@ best_baseline_name, best_baseline_row, best_baseline_frame = select_best_baselin
     analysis["interval"],
     analysis["strategy_config"],
     selected_result.baseline_comparison,
+    asset_class=analysis["asset_class"],
 )
 live_engine = resolve_live_engine_mode(
     requested_mode=engine_mode,
@@ -702,6 +719,7 @@ else:
 
 candidate_search_results = analysis.get("candidate_search_results", pd.DataFrame())
 candidate_search_summary = analysis.get("candidate_search_summary", {})
+live_baseline_universe_note = describe_live_baseline_universe(analysis["asset_class"], analysis["interval"])
 metric_lookup = metric_interpretation.set_index("metric")
 
 live_metric_items = [
@@ -797,7 +815,7 @@ if best_baseline_name is not None and baseline_execution_plan is not None:
             "annualized_return": float(best_baseline_row.get("annualized_return", 0.0)),
             "trades": float(best_baseline_row.get("trades", 0.0)),
             "latest_guardrail": "baseline_rule",
-            "notes": "Strongest simple reference on the same blind-OOS slices.",
+            "notes": "Strongest simple reference inside the asset-aware live baseline set on the same blind-OOS slices.",
         }
     )
 engine_comparison = pd.DataFrame(engine_comparison_rows)
@@ -972,6 +990,7 @@ with trades_tab:
             st.dataframe(selected_result.trade_log, use_container_width=True, hide_index=True)
 
 with baselines_tab:
+    st.info(live_baseline_universe_note)
     if not selected_result.baseline_comparison.empty:
         best_baseline_sharpe = float(best_baseline_row["sharpe"])
         strategy_sharpe = float(selected_result.metrics.get("sharpe", 0.0))
@@ -990,7 +1009,7 @@ with baselines_tab:
         if baseline_execution_plan is not None:
             baseline_cards = st.columns(4)
             baseline_card_items = [
-                ("Baseline Engine", baseline_display_name(best_baseline_name), "This is the strongest simple reference on the current stitched blind-OOS run."),
+                ("Baseline Engine", baseline_display_name(best_baseline_name), "This is the strongest simple reference inside the asset-aware live baseline set for this symbol."),
                 ("Baseline Action", baseline_execution_plan["action"], first_sentence(baseline_execution_plan["summary"])),
                 ("Baseline Held", baseline_execution_plan["held_position"], "This is the position the baseline itself is currently carrying."),
                 ("Baseline Sharpe", f"{best_baseline_sharpe:.2f}", "Current Sharpe for the strongest simple baseline on the same out-of-sample slices."),
@@ -1008,7 +1027,9 @@ with baselines_tab:
             st.caption(baseline_execution_plan["timing_note"])
     st.plotly_chart(plot_baseline_comparison(selected_result.baseline_comparison), use_container_width=True)
     st.dataframe(selected_result.baseline_comparison, use_container_width=True, hide_index=True)
-    st.caption("These are simpler reference systems on the same out-of-sample slices, including tougher ATR and daily-trend references. If the HMM cannot beat credible baselines, the added complexity is not earning its keep.")
+    st.caption(
+        "These are simpler reference systems on the same out-of-sample slices. `live_preferred` marks the asset-appropriate baseline universe used for live routing, while the extra rows stay visible for research context and stress-testing."
+    )
 
 with candidate_tab:
     if candidate_search_results.empty:
@@ -1073,6 +1094,11 @@ with methodology_tab:
                 ),
             },
             {
+                "component": "Robustness Basket",
+                "value": ", ".join(analysis.get("robustness_symbols", ())),
+                "interpretation": str(analysis.get("robustness_basket_note", "This run used the selected cross-asset basket for robustness checks.")),
+            },
+            {
                 "component": "Performance Stitching",
                 "value": "Blind test windows only",
                 "interpretation": "Displayed equity and metrics are stitched only from test slices that were not used in fitting or state labeling.",
@@ -1126,6 +1152,11 @@ with methodology_tab:
                 "component": "Current Engine Recommendation",
                 "value": engine_recommendation["headline"],
                 "interpretation": engine_recommendation["summary"],
+            },
+            {
+                "component": "Live Baseline Universe",
+                "value": "asset-aware preferred set",
+                "interpretation": live_baseline_universe_note,
             },
             {
                 "component": "Live Engine Mode",
@@ -1283,6 +1314,7 @@ with confidence_tab:
 with robustness_tab:
     st.plotly_chart(plot_robustness_results(robustness), use_container_width=True)
     st.dataframe(robustness, use_container_width=True)
+    st.caption(str(analysis.get("robustness_basket_note", "Robustness checks rerun the same methodology across the selected basket.")))
 
 with notes_tab:
     st.subheader("Research Notes")

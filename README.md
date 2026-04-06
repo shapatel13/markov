@@ -21,6 +21,7 @@ Local, inspectable Hidden Markov Model regime research app with walk-forward ret
 - Checks robustness across a multi-asset basket instead of only the primary symbol.
 - Exports the signal history as both CSV and JSON.
 - Benchmarks the HMM against tougher simple references including ATR trend, ATR breakout-stop, and daily-trend-filter baselines.
+- Routes the live baseline recommendation through an asset-aware preferred set, so equities favor slower trend and breakout references while crypto keeps ATR-aware 24/7 references.
 - Adds a dedicated candidate-search workflow that keeps FMP primary and ranks feature pack, state count, shorting mode, and confirmation mode on deeper backfilled crypto history only when needed.
 - Makes an explicit engine recommendation in the app: use the HMM, use the best simple baseline, or stay in research / flat mode.
 - Adds a constrained local `autoresearch` loop with a frozen evaluator, feature-pack candidates, `research_program.md`, local `results.tsv` logging, and artifact export for the best runs.
@@ -130,6 +131,7 @@ python -m streamlit run app.py
 - Training, validation, and test windows are fully separated in each fold, with optional purge and embargo bars to reduce leakage around window boundaries.
 - The app now includes a dedicated `Methodology` panel showing the walk-forward schedule, current friction assumptions, and promotion gates for the active run.
 - The app now auto-detects whether the symbol is crypto or equity and adjusts default interval, annualization basis, walk-forward windows, robustness basket, and cost assumptions accordingly.
+- The `Methodology` and `Robustness` sections now explain why a peer basket was chosen, so `AAPL` can be judged against `AAPL,MSFT,NVDA` while unmapped names clearly fall back to broad-market baskets.
 - Trust and promotion logic now treat sample depth differently for equities versus 24/7 crypto, so a one-year daily equity sample is no longer judged as if it were an underpowered crypto history.
 - That same `Methodology` panel now includes a nested holdout check, where inner folds choose sweep settings and the most recent untouched outer folds judge whether those settings still work.
 - The current exploratory default operating profile is `BTCUSD` on `4hour` with the `mean_reversion` feature pack, `8` states, and `auto` historical provider. This is a research preset, not a promoted live strategy.

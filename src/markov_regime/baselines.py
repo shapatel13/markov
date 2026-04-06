@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from markov_regime.config import Interval, StrategyConfig
+from markov_regime.config import AssetClass, Interval, StrategyConfig, infer_asset_class
 from markov_regime.strategy import build_buy_and_hold_frame, compute_metrics, estimate_execution_cost_bps
 
 BASELINE_DISPLAY_NAMES: dict[str, str] = {
@@ -18,11 +18,101 @@ BASELINE_DISPLAY_NAMES: dict[str, str] = {
     "daily_trend_filter": "Daily Trend Filter",
     "atr_causal_trend": "ATR Causal Trend",
     "daily_breakout_filter": "Daily Breakout Filter",
+    "equity_200d_trend": "Equity 200D Trend",
+    "equity_breakout_guard": "Equity Breakout Guard",
+}
+
+BASELINE_SCOPE: dict[str, str] = {
+    "buy_and_hold": "shared",
+    "ema_trend": "shared",
+    "vol_filtered_trend": "crypto",
+    "breakout": "shared",
+    "atr_trend": "crypto",
+    "atr_breakout_stop": "crypto",
+    "daily_trend_filter": "shared",
+    "atr_causal_trend": "crypto",
+    "daily_breakout_filter": "shared",
+    "equity_200d_trend": "equity",
+    "equity_breakout_guard": "equity",
 }
 
 
 def baseline_display_name(name: str) -> str:
     return BASELINE_DISPLAY_NAMES.get(name, name.replace("_", " ").title())
+
+
+def _infer_asset_class_from_frame(frame: pd.DataFrame, default: AssetClass = "crypto") -> AssetClass:
+    if "asset_class" in frame.columns:
+        non_null = frame["asset_class"].dropna()
+        if not non_null.empty:
+            value = str(non_null.iloc[-1]).strip().lower()
+            if value in {"crypto", "equity"}:
+                return value  # type: ignore[return-value]
+    for column in ("resolved_symbol", "symbol"):
+        if column in frame.columns:
+            non_null = frame[column].dropna()
+            if not non_null.empty:
+                return infer_asset_class(str(non_null.iloc[-1]))
+    return default
+
+
+def preferred_baseline_names(asset_class: AssetClass, interval: Interval) -> tuple[str, ...]:
+    if asset_class == "equity":
+        preferred = (
+            "buy_and_hold",
+            "equity_200d_trend",
+            "equity_breakout_guard",
+            "daily_breakout_filter",
+            "breakout",
+            "daily_trend_filter",
+        )
+        if interval in {"4hour", "1hour"}:
+            preferred = preferred + ("ema_trend",)
+        return preferred
+    preferred = (
+        "buy_and_hold",
+        "daily_breakout_filter",
+        "atr_breakout_stop",
+        "atr_causal_trend",
+        "atr_trend",
+        "breakout",
+        "daily_trend_filter",
+        "ema_trend",
+        "vol_filtered_trend",
+    )
+    if interval == "1day":
+        preferred = tuple(name for name in preferred if name != "vol_filtered_trend")
+    return preferred
+
+
+def describe_live_baseline_universe(asset_class: AssetClass, interval: Interval) -> str:
+    universe = ", ".join(baseline_display_name(name) for name in preferred_baseline_names(asset_class, interval))
+    if asset_class == "equity":
+        return (
+            f"Live equity baseline set: {universe}. This keeps the live comparison anchored to slower trend and "
+            "breakout references that are more natural for stocks and ETFs."
+        )
+    return (
+        f"Live crypto baseline set: {universe}. This keeps the live comparison anchored to 24/7 trend, breakout, "
+        "and ATR-aware references that are more natural for crypto."
+    )
+
+
+def _filter_live_baseline_rows(
+    comparison: pd.DataFrame,
+    *,
+    asset_class: AssetClass,
+    interval: Interval,
+) -> pd.DataFrame:
+    if comparison.empty:
+        return comparison
+    if "live_preferred" in comparison.columns:
+        preferred_rows = comparison.loc[comparison["live_preferred"].fillna(False).astype(bool)]
+        if not preferred_rows.empty:
+            return preferred_rows
+    preferred = set(preferred_baseline_names(asset_class, interval))
+    preferred_rows = comparison.loc[comparison["baseline"].isin(preferred)]
+    return preferred_rows if not preferred_rows.empty else comparison
 
 
 def _bars_held_from_position(signal_position: pd.Series) -> pd.Series:
@@ -237,8 +327,69 @@ def build_daily_breakout_filter_baseline(frame: pd.DataFrame, config: StrategyCo
     return _finalize_baseline_frame(baseline_frame, position, config, "daily_breakout_filter")
 
 
+def build_equity_200d_trend_baseline(frame: pd.DataFrame, config: StrategyConfig) -> pd.DataFrame:
+    sma_50 = frame["close"].rolling(50, min_periods=25).mean()
+    sma_100 = frame["close"].rolling(100, min_periods=50).mean()
+    sma_200 = frame["close"].rolling(200, min_periods=100).mean()
+    long_regime = (
+        (frame["close"] > sma_200)
+        & (sma_50 > sma_200)
+        & (sma_50.pct_change(10, fill_method=None).fillna(0.0) >= -0.01)
+    )
+
+    current_position = 0
+    positions: list[int] = []
+    for close, regime_ok, fast_line, mid_line in zip(frame["close"], long_regime, sma_50, sma_100, strict=True):
+        if np.isnan(fast_line) or np.isnan(mid_line):
+            current_position = 0
+        elif current_position == 0 and regime_ok and close > fast_line:
+            current_position = 1
+        elif current_position == 1 and (close < mid_line or not regime_ok):
+            current_position = 0
+        positions.append(current_position)
+
+    position = pd.Series(positions, index=frame.index, dtype="int64")
+    baseline_frame = frame.assign(
+        entry_trigger=sma_50.fillna(sma_200),
+        stop_level=sma_100.fillna(sma_200),
+    )
+    return _finalize_baseline_frame(baseline_frame, position, config, "equity_200d_trend")
+
+
+def build_equity_breakout_guard_baseline(frame: pd.DataFrame, config: StrategyConfig) -> pd.DataFrame:
+    sma_50 = frame["close"].rolling(50, min_periods=25).mean()
+    sma_100 = frame["close"].rolling(100, min_periods=50).mean()
+    sma_200 = frame["close"].rolling(200, min_periods=100).mean()
+    entry_level = frame["high"].rolling(55, min_periods=20).max().shift(1)
+    protective_low = frame["low"].rolling(20, min_periods=10).min().shift(1)
+    stop_level = pd.concat([protective_low, sma_100], axis=1).max(axis=1)
+
+    current_position = 0
+    positions: list[int] = []
+    for close, entry_trigger, stop_trigger, fast_line, slow_line in zip(
+        frame["close"],
+        entry_level,
+        stop_level,
+        sma_50,
+        sma_200,
+        strict=True,
+    ):
+        trend_ok = not np.isnan(fast_line) and not np.isnan(slow_line) and fast_line > slow_line and close > slow_line
+        if np.isnan(entry_trigger) or np.isnan(stop_trigger):
+            current_position = 0
+        elif current_position == 0 and trend_ok and close > entry_trigger:
+            current_position = 1
+        elif current_position == 1 and (close < stop_trigger or not trend_ok):
+            current_position = 0
+        positions.append(current_position)
+
+    position = pd.Series(positions, index=frame.index, dtype="int64")
+    baseline_frame = frame.assign(entry_trigger=entry_level, stop_level=stop_level)
+    return _finalize_baseline_frame(baseline_frame, position, config, "equity_breakout_guard")
+
+
 def build_baseline_frames(frame: pd.DataFrame, config: StrategyConfig) -> dict[str, pd.DataFrame]:
-    return {
+    frames = {
         "buy_and_hold": build_buy_and_hold_frame(frame),
         "ema_trend": build_ema_trend_baseline(frame, config),
         "vol_filtered_trend": build_vol_filtered_trend_baseline(frame, config),
@@ -248,16 +399,29 @@ def build_baseline_frames(frame: pd.DataFrame, config: StrategyConfig) -> dict[s
         "daily_trend_filter": build_daily_trend_filter_baseline(frame, config),
         "atr_causal_trend": build_atr_causal_trend_baseline(frame, config),
         "daily_breakout_filter": build_daily_breakout_filter_baseline(frame, config),
+        "equity_200d_trend": build_equity_200d_trend_baseline(frame, config),
+        "equity_breakout_guard": build_equity_breakout_guard_baseline(frame, config),
     }
+    return frames
 
 
-def summarize_baselines(frame: pd.DataFrame, interval: Interval, config: StrategyConfig) -> pd.DataFrame:
+def summarize_baselines(
+    frame: pd.DataFrame,
+    interval: Interval,
+    config: StrategyConfig,
+    asset_class: AssetClass | None = None,
+) -> pd.DataFrame:
+    resolved_asset_class = asset_class or _infer_asset_class_from_frame(frame)
+    live_preferred = set(preferred_baseline_names(resolved_asset_class, interval))
     rows: list[dict[str, float | str]] = []
     for baseline_name, baseline_frame in build_baseline_frames(frame, config).items():
         metrics = compute_metrics(baseline_frame, interval)
         rows.append(
             {
                 "baseline": baseline_name,
+                "display_name": baseline_display_name(baseline_name),
+                "asset_scope": BASELINE_SCOPE.get(baseline_name, "shared"),
+                "live_preferred": baseline_name in live_preferred,
                 "sharpe": metrics["sharpe"],
                 "annualized_return": metrics["annualized_return"],
                 "max_drawdown": metrics["max_drawdown"],
@@ -267,7 +431,11 @@ def summarize_baselines(frame: pd.DataFrame, interval: Interval, config: Strateg
                 "exposure": metrics["exposure"],
             }
         )
-    return pd.DataFrame(rows).sort_values("sharpe", ascending=False).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["live_preferred", "sharpe"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
 def select_best_baseline_frame(
@@ -275,11 +443,18 @@ def select_best_baseline_frame(
     interval: Interval,
     config: StrategyConfig,
     baseline_comparison: pd.DataFrame | None = None,
+    asset_class: AssetClass | None = None,
 ) -> tuple[str | None, pd.Series, pd.DataFrame]:
-    comparison = baseline_comparison if baseline_comparison is not None and not baseline_comparison.empty else summarize_baselines(frame, interval, config)
+    resolved_asset_class = asset_class or _infer_asset_class_from_frame(frame)
+    comparison = (
+        baseline_comparison
+        if baseline_comparison is not None and not baseline_comparison.empty
+        else summarize_baselines(frame, interval, config, resolved_asset_class)
+    )
     if comparison.empty:
         return None, pd.Series(dtype=object), pd.DataFrame()
 
+    comparison = _filter_live_baseline_rows(comparison, asset_class=resolved_asset_class, interval=interval)
     best_row = comparison.sort_values("sharpe", ascending=False).iloc[0]
     baseline_name = str(best_row["baseline"])
     frames = build_baseline_frames(frame, config)

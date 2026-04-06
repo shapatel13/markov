@@ -13,6 +13,7 @@ from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.baselines import (
     build_baseline_execution_plan,
     build_daily_trend_filter_baseline,
+    describe_live_baseline_universe,
     select_best_baseline_frame,
     summarize_baselines,
 )
@@ -32,6 +33,7 @@ from markov_regime.config import (
     SweepConfig,
     WalkForwardConfig,
     bars_per_year,
+    describe_robustness_basket,
     default_asset_settings,
     default_robustness_basket,
     default_walk_forward_config,
@@ -779,6 +781,18 @@ def test_baseline_summary_includes_expected_references(synthetic_feature_frame: 
         "daily_breakout_filter",
     }.issubset(set(baseline_comparison["baseline"]))
     assert {"sharpe", "annualized_return", "trades", "expectancy"}.issubset(baseline_comparison.columns)
+    assert {"display_name", "asset_scope", "live_preferred"}.issubset(baseline_comparison.columns)
+
+
+def test_equity_baseline_summary_marks_live_preferred_rows(synthetic_feature_frame: pd.DataFrame) -> None:
+    frame = synthetic_feature_frame.copy()
+    frame["asset_class"] = "equity"
+    baseline_comparison = summarize_baselines(frame, "1day", StrategyConfig(), asset_class="equity")
+
+    assert {"equity_200d_trend", "equity_breakout_guard"}.issubset(set(baseline_comparison["baseline"]))
+    preferred_lookup = baseline_comparison.set_index("baseline")["live_preferred"].to_dict()
+    assert preferred_lookup["equity_200d_trend"] is True
+    assert preferred_lookup["equity_breakout_guard"] is True
 
 
 def test_daily_trend_filter_baseline_uses_daily_context_when_available(synthetic_feature_frame: pd.DataFrame) -> None:
@@ -812,6 +826,30 @@ def test_select_best_baseline_frame_uses_supplied_leaderboard(synthetic_feature_
     assert best_row["baseline"] == "daily_breakout_filter"
     assert not baseline_frame.empty
     assert baseline_frame["baseline_name"].eq("daily_breakout_filter").all()
+
+
+def test_select_best_baseline_frame_prefers_equity_native_live_rows(synthetic_feature_frame: pd.DataFrame) -> None:
+    frame = synthetic_feature_frame.copy()
+    frame["asset_class"] = "equity"
+    comparison = pd.DataFrame(
+        [
+            {"baseline": "vol_filtered_trend", "sharpe": 1.2, "live_preferred": False},
+            {"baseline": "equity_200d_trend", "sharpe": 0.6, "live_preferred": True},
+        ]
+    )
+
+    baseline_name, best_row, baseline_frame = select_best_baseline_frame(
+        frame,
+        "1day",
+        StrategyConfig(),
+        comparison,
+        asset_class="equity",
+    )
+
+    assert baseline_name == "equity_200d_trend"
+    assert best_row["baseline"] == "equity_200d_trend"
+    assert not baseline_frame.empty
+    assert baseline_frame["baseline_name"].eq("equity_200d_trend").all()
 
 
 def test_block_bootstrap_returns_major_metric_intervals() -> None:
@@ -890,6 +928,21 @@ def test_infer_asset_class_and_defaults_switch_for_equities() -> None:
     assert defaults.feature_pack == "trend"
     assert default_robustness_basket("SPY", "equity") == ("SPY", "QQQ", "IWM")
     assert default_robustness_basket("AAPL", "equity") == ("AAPL", "MSFT", "NVDA")
+
+
+def test_describe_robustness_basket_explains_equity_peer_map() -> None:
+    basket, reason = describe_robustness_basket("AAPL", "equity")
+
+    assert basket == ("AAPL", "MSFT", "NVDA")
+    assert "mega-cap technology" in reason
+
+
+def test_describe_live_baseline_universe_mentions_asset_class() -> None:
+    crypto_note = describe_live_baseline_universe("crypto", "4hour")
+    equity_note = describe_live_baseline_universe("equity", "1day")
+
+    assert "Live crypto baseline set" in crypto_note
+    assert "Live equity baseline set" in equity_note
 
 
 def test_compute_metrics_uses_equity_annualization_from_frame_metadata() -> None:

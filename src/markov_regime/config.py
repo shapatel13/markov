@@ -124,6 +124,33 @@ EQUITY_PEER_BASKETS: dict[str, tuple[str, ...]] = {
     "GLD": ("GLD", "SLV", "DBC"),
 }
 
+EQUITY_PEER_GROUP_LABELS: dict[str, str] = {
+    "SPY": "broad U.S. index basket",
+    "QQQ": "growth-heavy index basket",
+    "IWM": "small-cap index basket",
+    "DIA": "large-cap industrial basket",
+    "AAPL": "mega-cap technology peer basket",
+    "MSFT": "mega-cap software peer basket",
+    "NVDA": "semiconductor leadership basket",
+    "AMD": "semiconductor peer basket",
+    "AVGO": "semiconductor infrastructure basket",
+    "GOOGL": "internet platform peer basket",
+    "GOOG": "internet platform peer basket",
+    "META": "digital advertising peer basket",
+    "AMZN": "consumer platform peer basket",
+    "TSLA": "auto and EV peer basket",
+    "JPM": "money-center bank basket",
+    "BAC": "money-center bank basket",
+    "XLF": "financial sector basket",
+    "XLE": "energy sector basket",
+    "XOM": "energy major basket",
+    "CVX": "energy major basket",
+    "SMH": "semiconductor ETF basket",
+    "SOXX": "semiconductor ETF basket",
+    "TLT": "duration-sensitive rates basket",
+    "GLD": "precious-metals basket",
+}
+
 
 @dataclass(frozen=True)
 class AssetDefaults:
@@ -164,6 +191,41 @@ def default_robustness_basket(symbol: str, asset_class: AssetClass | None = None
         candidates = list(EQUITY_PEER_BASKETS.get(cleaned, (cleaned, "SPY", "QQQ")))
     deduped = list(dict.fromkeys(item for item in candidates if item))
     return tuple(deduped[:3] if len(deduped) >= 3 else deduped)
+
+
+def describe_robustness_basket(symbol: str, asset_class: AssetClass | None = None) -> tuple[tuple[str, ...], str]:
+    resolved_asset_class = asset_class or infer_asset_class(symbol)
+    cleaned = str(symbol).strip().upper()
+    basket = default_robustness_basket(cleaned, resolved_asset_class)
+
+    if resolved_asset_class == "crypto":
+        if cleaned in {"BTCUSD", "ETHUSD", "SOLUSD"}:
+            reason = (
+                "Crypto majors are compared against BTCUSD, ETHUSD, and SOLUSD so the signal has to generalize "
+                "across liquid 24/7 leaders instead of looking good on only one coin."
+            )
+        else:
+            anchors = ", ".join(item for item in basket if item != cleaned)
+            reason = (
+                f"Crypto robustness keeps {cleaned} in the basket, then adds liquid majors like {anchors} "
+                "so the result is checked against broader market behavior instead of one isolated series."
+            )
+        return basket, reason
+
+    if cleaned in EQUITY_PEER_BASKETS:
+        group_label = EQUITY_PEER_GROUP_LABELS.get(cleaned, "recognized equity peer basket")
+        reason = (
+            f"Equity robustness uses a {group_label}: {', '.join(basket)}. "
+            "That keeps the check closer to the symbol's actual peer set than a generic crypto-style basket."
+        )
+        return basket, reason
+
+    reason = (
+        f"{cleaned} does not have a dedicated peer map yet, so the app falls back to a broad equity basket "
+        f"of {', '.join(basket)}. That is a reasonable first-pass robustness check, but it is less specific "
+        "than a curated sector peer set."
+    )
+    return basket, reason
 
 
 def default_asset_settings(symbol: str) -> AssetDefaults:

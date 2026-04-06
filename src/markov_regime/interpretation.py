@@ -103,10 +103,20 @@ def _median_robustness_sharpe(robustness: pd.DataFrame) -> float | None:
     return float(ok_rows.median())
 
 
+def _live_baseline_rows(baseline_comparison: pd.DataFrame) -> pd.DataFrame:
+    if baseline_comparison.empty:
+        return baseline_comparison
+    if "live_preferred" not in baseline_comparison.columns:
+        return baseline_comparison
+    preferred_rows = baseline_comparison.loc[baseline_comparison["live_preferred"].fillna(False).astype(bool)]
+    return preferred_rows if not preferred_rows.empty else baseline_comparison
+
+
 def _best_baseline_sharpe(baseline_comparison: pd.DataFrame) -> float | None:
     if baseline_comparison.empty or "sharpe" not in baseline_comparison.columns:
         return None
-    return float(baseline_comparison["sharpe"].max())
+    live_rows = _live_baseline_rows(baseline_comparison)
+    return float(live_rows["sharpe"].max())
 
 
 def first_sentence(text: str) -> str:
@@ -1060,7 +1070,7 @@ def recommend_strategy_engine(
     promotion_verdict = str((promotion_summary or {}).get("verdict", "Unavailable"))
 
     if baseline_comparison is not None and not baseline_comparison.empty:
-        best_baseline = baseline_comparison.sort_values("sharpe", ascending=False).iloc[0]
+        best_baseline = _live_baseline_rows(baseline_comparison).sort_values("sharpe", ascending=False).iloc[0]
         baseline_name = str(best_baseline.get("baseline", "baseline"))
         baseline_sharpe = float(best_baseline.get("sharpe", 0.0))
     else:
