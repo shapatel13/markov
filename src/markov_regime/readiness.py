@@ -361,6 +361,7 @@ def run_primetime_audit(
         walk_adjusted=was_adjusted,
         fold_count=int(len(selected_result.fold_diagnostics)),
         nested_holdout=nested_holdout,
+        asset_class=asset_class,
     )
     strategy_summary = summarize_promotion_gates(strategy_gates)
 

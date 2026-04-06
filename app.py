@@ -593,6 +593,7 @@ metric_interpretation = build_metric_interpretation_rows(
     interval=analysis["interval"],
     available_rows=analysis["available_rows"],
     walk_adjusted=analysis["walk_adjusted"],
+    asset_class=analysis["asset_class"],
 )
 control_interpretation = build_control_interpretation_rows(
     interval=analysis["interval"],
@@ -612,6 +613,7 @@ promotion_gates = build_promotion_gate_rows(
     walk_adjusted=analysis["walk_adjusted"],
     fold_count=int(len(selected_result.fold_diagnostics)),
     nested_holdout=nested_holdout,
+    asset_class=analysis["asset_class"],
 )
 promotion_snapshot = summarize_promotion_gates(promotion_gates)
 trust_snapshot = build_trust_snapshot(
@@ -622,6 +624,7 @@ trust_snapshot = build_trust_snapshot(
     interval=analysis["interval"],
     available_rows=analysis["available_rows"],
     walk_adjusted=analysis["walk_adjusted"],
+    asset_class=analysis["asset_class"],
 )
 engine_recommendation = recommend_strategy_engine(
     strategy_metrics=selected_result.metrics,

@@ -4,7 +4,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from markov_regime.config import Interval, StrategyConfig, WalkForwardConfig
+from markov_regime.config import AssetClass, Interval, StrategyConfig, WalkForwardConfig
 
 POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
@@ -64,13 +64,20 @@ def _duration_label(interval: Interval, bars: int) -> str:
     return f"{bars} bars"
 
 
-def _sample_band(interval: Interval, available_rows: int) -> str:
-    thresholds = {
-        "1hour": (2500, 6000),
-        "4hour": (1800, 3200),
-        "1day": (500, 900),
+def _sample_band(interval: Interval, available_rows: int, asset_class: AssetClass = "crypto") -> str:
+    thresholds: dict[AssetClass, dict[Interval, tuple[int, int]]] = {
+        "crypto": {
+            "1hour": (2500, 6000),
+            "4hour": (1800, 3200),
+            "1day": (500, 900),
+        },
+        "equity": {
+            "1hour": (800, 1800),
+            "4hour": (300, 700),
+            "1day": (252, 756),
+        },
     }
-    thin, deeper = thresholds[interval]
+    thin, deeper = thresholds[asset_class][interval]
     if available_rows < thin:
         return "thin"
     if available_rows < deeper:
@@ -270,13 +277,14 @@ def build_trust_snapshot(
     interval: Interval,
     available_rows: int,
     walk_adjusted: bool,
+    asset_class: AssetClass = "crypto",
 ) -> dict[str, Any]:
     sharpe = float(metrics.get("sharpe", 0.0))
     trades = float(metrics.get("trades", 0.0))
     stability = float(state_stability["stability_score"].median()) if not state_stability.empty else 0.0
     sharpe_lower, sharpe_upper = _bootstrap_interval(bootstrap, "sharpe")
     robustness_median = _median_robustness_sharpe(robustness)
-    sample_band = _sample_band(interval, available_rows)
+    sample_band = _sample_band(interval, available_rows, asset_class)
 
     score = 0
     reasons: list[str] = []
@@ -360,6 +368,7 @@ def build_metric_interpretation_rows(
     interval: Interval,
     available_rows: int,
     walk_adjusted: bool,
+    asset_class: AssetClass = "crypto",
 ) -> pd.DataFrame:
     current_position = int(latest_row.get("signal_position", 0))
     candidate_action = int(latest_row.get("candidate_action", 0))
@@ -383,6 +392,7 @@ def build_metric_interpretation_rows(
         interval=interval,
         available_rows=available_rows,
         walk_adjusted=walk_adjusted,
+        asset_class=asset_class,
     )
     sharpe_lower = snapshot["bootstrap_sharpe_lower"]
     sharpe_upper = snapshot["bootstrap_sharpe_upper"]
@@ -916,6 +926,7 @@ def build_promotion_gate_rows(
     walk_adjusted: bool,
     fold_count: int,
     nested_holdout: Mapping[str, Any] | None = None,
+    asset_class: AssetClass = "crypto",
 ) -> pd.DataFrame:
     sharpe = float(metrics.get("sharpe", 0.0))
     trades = float(metrics.get("trades", 0.0))
@@ -923,7 +934,7 @@ def build_promotion_gate_rows(
     stability = float(state_stability["stability_score"].median()) if not state_stability.empty else 0.0
     robustness_median = _median_robustness_sharpe(robustness)
     best_baseline_sharpe = _best_baseline_sharpe(baseline_comparison)
-    sample_band = _sample_band(interval, available_rows)
+    sample_band = _sample_band(interval, available_rows, asset_class)
     nested_status = str((nested_holdout or {}).get("status", "unavailable"))
     outer_holdout_sharpe = (
         float((nested_holdout or {}).get("outer_holdout_sharpe", 0.0))

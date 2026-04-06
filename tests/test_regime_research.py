@@ -889,6 +889,7 @@ def test_infer_asset_class_and_defaults_switch_for_equities() -> None:
     assert defaults.interval == "1day"
     assert defaults.feature_pack == "trend"
     assert default_robustness_basket("SPY", "equity") == ("SPY", "QQQ", "IWM")
+    assert default_robustness_basket("AAPL", "equity") == ("AAPL", "MSFT", "NVDA")
 
 
 def test_compute_metrics_uses_equity_annualization_from_frame_metadata() -> None:
@@ -960,6 +961,21 @@ def test_trust_snapshot_flags_thin_positive_run_as_fragile() -> None:
 
     assert snapshot["verdict"] == "Promising but fragile"
     assert "bootstrap still crosses zero" in snapshot["summary"]
+
+
+def test_trust_snapshot_treats_equity_daily_sample_more_generously() -> None:
+    snapshot = build_trust_snapshot(
+        metrics={"sharpe": 0.6, "trades": 8.0},
+        bootstrap=pd.DataFrame([{"metric": "sharpe", "lower": -0.2, "upper": 1.1}]),
+        state_stability=pd.DataFrame([{"canonical_state": 0, "stability_score": 0.6}]),
+        robustness=pd.DataFrame([{"symbol": "SPY", "status": "ok", "sharpe": 0.2}]),
+        interval="1day",
+        available_rows=520,
+        walk_adjusted=False,
+        asset_class="equity",
+    )
+
+    assert snapshot["sample_band"] == "usable"
 
 
 def test_metric_interpretation_explains_held_position_vs_candidate() -> None:

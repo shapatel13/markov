@@ -97,6 +97,33 @@ CRYPTO_ALIASES: set[str] = {
     "BNBUSD",
 }
 
+EQUITY_PEER_BASKETS: dict[str, tuple[str, ...]] = {
+    "SPY": ("SPY", "QQQ", "IWM"),
+    "QQQ": ("QQQ", "SPY", "IWM"),
+    "IWM": ("IWM", "SPY", "QQQ"),
+    "DIA": ("DIA", "SPY", "QQQ"),
+    "AAPL": ("AAPL", "MSFT", "NVDA"),
+    "MSFT": ("MSFT", "AAPL", "GOOGL"),
+    "NVDA": ("NVDA", "AMD", "AVGO"),
+    "AMD": ("AMD", "NVDA", "AVGO"),
+    "AVGO": ("AVGO", "NVDA", "AMD"),
+    "GOOGL": ("GOOGL", "MSFT", "META"),
+    "GOOG": ("GOOG", "GOOGL", "MSFT"),
+    "META": ("META", "GOOGL", "AMZN"),
+    "AMZN": ("AMZN", "META", "WMT"),
+    "TSLA": ("TSLA", "GM", "F"),
+    "JPM": ("JPM", "BAC", "XLF"),
+    "BAC": ("BAC", "JPM", "XLF"),
+    "XLF": ("XLF", "JPM", "BAC"),
+    "XLE": ("XLE", "XOM", "CVX"),
+    "XOM": ("XOM", "CVX", "XLE"),
+    "CVX": ("CVX", "XOM", "XLE"),
+    "SMH": ("SMH", "NVDA", "AMD"),
+    "SOXX": ("SOXX", "NVDA", "AMD"),
+    "TLT": ("TLT", "IEF", "SHY"),
+    "GLD": ("GLD", "SLV", "DBC"),
+}
+
 
 @dataclass(frozen=True)
 class AssetDefaults:
@@ -134,7 +161,7 @@ def default_robustness_basket(symbol: str, asset_class: AssetClass | None = None
     if resolved_asset_class == "crypto":
         candidates = [cleaned, "BTCUSD", "ETHUSD", "SOLUSD"]
     else:
-        candidates = [cleaned, "SPY", "QQQ", "IWM"]
+        candidates = list(EQUITY_PEER_BASKETS.get(cleaned, (cleaned, "SPY", "QQQ")))
     deduped = list(dict.fromkeys(item for item in candidates if item))
     return tuple(deduped[:3] if len(deduped) >= 3 else deduped)
 
