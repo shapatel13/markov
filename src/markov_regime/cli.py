@@ -11,7 +11,9 @@ from markov_regime.config import (
     StrategyConfig,
     SweepConfig,
     WalkForwardConfig,
+    default_asset_settings,
     default_walk_forward_config,
+    infer_asset_class,
 )
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame, get_feature_columns, list_feature_packs
@@ -56,7 +58,7 @@ def _parse_short_modes(values: str) -> tuple[bool, ...]:
 
 
 def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
-    interval_defaults = default_walk_forward_config(args.interval)
+    interval_defaults = default_walk_forward_config(args.interval, infer_asset_class(args.symbol))
     return WalkForwardConfig(
         train_bars=args.train_bars if args.train_bars is not None else interval_defaults.train_bars,
         purge_bars=args.purge_bars if args.purge_bars is not None else interval_defaults.purge_bars,
@@ -65,6 +67,21 @@ def _resolve_cli_walk_config(args: argparse.Namespace) -> WalkForwardConfig:
         test_bars=args.test_bars if args.test_bars is not None else interval_defaults.test_bars,
         refit_stride_bars=args.refit_stride_bars if args.refit_stride_bars is not None else interval_defaults.refit_stride_bars,
     )
+
+
+def _apply_asset_cli_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    defaults = default_asset_settings(args.symbol)
+    if hasattr(args, "robustness_symbols") and getattr(args, "robustness_symbols") == "BTCUSD,ETHUSD,SOLUSD":
+        args.robustness_symbols = ",".join(defaults.robustness_symbols)
+    if hasattr(args, "cost_bps") and getattr(args, "cost_bps") == 10.0 and defaults.cost_bps != 10.0:
+        args.cost_bps = defaults.cost_bps
+    if hasattr(args, "spread_bps") and getattr(args, "spread_bps") == 4.0 and defaults.spread_bps != 4.0:
+        args.spread_bps = defaults.spread_bps
+    if hasattr(args, "slippage_bps") and getattr(args, "slippage_bps") == 3.0 and defaults.slippage_bps != 3.0:
+        args.slippage_bps = defaults.slippage_bps
+    if hasattr(args, "impact_bps") and getattr(args, "impact_bps") == 2.0 and defaults.impact_bps != 2.0:
+        args.impact_bps = defaults.impact_bps
+    return args
 
 
 def _common_parser(parser: argparse.ArgumentParser) -> None:
@@ -139,9 +156,9 @@ def _load_result(args: argparse.Namespace):
         confirmation_fetched = fetch_price_data(confirmation_config)
         confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
         confirmation_walk_config = (
-            default_walk_forward_config("1day")
+            default_walk_forward_config("1day", infer_asset_class(args.symbol))
             if args.strict_windows
-            else suggest_walk_forward_config(len(confirmation_features), default_walk_forward_config("1day"))[0]
+            else suggest_walk_forward_config(len(confirmation_features), default_walk_forward_config("1day", infer_asset_class(args.symbol)))[0]
         )
         confirmation_result = run_walk_forward(
             feature_frame=confirmation_features,
@@ -241,7 +258,7 @@ def main() -> None:
     autoresearch_parser.add_argument("--program", default="research_program.md")
     autoresearch_parser.add_argument("--results", default="results.tsv")
 
-    args = parser.parse_args()
+    args = _apply_asset_cli_defaults(parser.parse_args())
 
     if args.command == "init-research":
         program_path = write_research_program(args.program)

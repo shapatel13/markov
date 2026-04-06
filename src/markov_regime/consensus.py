@@ -16,6 +16,7 @@ from markov_regime.strategy import (
     build_trade_table,
     compute_metrics,
     estimate_execution_cost_bps,
+    infer_asset_class_from_frame,
     stress_test_transaction_costs,
     summarize_trade_table,
 )
@@ -58,10 +59,11 @@ def _resolve_feature_context(
 
     fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit, provider=history_provider))
     feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
+    asset_class = infer_asset_class_from_frame(feature_frame)
     walk_config, was_adjusted = (
-        suggest_walk_forward_config(len(feature_frame), default_walk_forward_config(interval))
+        suggest_walk_forward_config(len(feature_frame), default_walk_forward_config(interval, asset_class))
         if auto_adjust_windows
-        else (default_walk_forward_config(interval), False)
+        else (default_walk_forward_config(interval, asset_class), False)
     )
     cache[key] = (fetched, feature_frame, walk_config, was_adjusted)
     return cache[key]
@@ -446,11 +448,13 @@ def apply_consensus_confirmation(
         return primary_result
     aligned = align_consensus_predictions(primary_result.predictions, diagnostics.timeline)
     confirmed_predictions, consensus_summary = apply_consensus_overlay(aligned, strategy_config)
-    updated_metrics = compute_metrics(confirmed_predictions, interval)
+    asset_class = infer_asset_class_from_frame(confirmed_predictions)
+    updated_metrics = compute_metrics(confirmed_predictions, interval, asset_class=asset_class)
     updated_cost_stress = stress_test_transaction_costs(confirmed_predictions, strategy_config.cost_grid, interval, strategy_config)
     updated_bootstrap = block_bootstrap_confidence_intervals(
         confirmed_predictions["net_strategy_return"],
         interval=interval,
+        asset_class=asset_class,
         block_length=max(strategy_config.signal_horizon * 2, 8),
     )
     updated_trade_log = build_trade_table(confirmed_predictions)
@@ -458,7 +462,7 @@ def apply_consensus_confirmation(
     updated_baseline_comparison = summarize_baselines(confirmed_predictions, interval, strategy_config)
     updated_fold_diagnostics = primary_result.fold_diagnostics.copy()
     for fold_id, fold_frame in confirmed_predictions.groupby("fold_id", sort=True):
-        metrics = compute_metrics(fold_frame, interval)
+        metrics = compute_metrics(fold_frame, interval, asset_class=asset_class)
         for metric_name, metric_value in metrics.items():
             if metric_name in updated_fold_diagnostics.columns:
                 updated_fold_diagnostics.loc[updated_fold_diagnostics["fold_id"] == fold_id, metric_name] = metric_value
@@ -475,7 +479,7 @@ def apply_consensus_confirmation(
         predictions=confirmed_predictions,
         fold_diagnostics=updated_fold_diagnostics,
         metrics=updated_metrics,
-        benchmark_metrics=compute_metrics(build_buy_and_hold_frame(confirmed_predictions), interval),
+        benchmark_metrics=compute_metrics(build_buy_and_hold_frame(confirmed_predictions), interval, asset_class=asset_class),
         cost_stress=updated_cost_stress,
         bootstrap=updated_bootstrap,
         trade_log=updated_trade_log,

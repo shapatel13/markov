@@ -25,7 +25,18 @@ from markov_regime.consensus import (
     summarize_consensus,
 )
 from markov_regime.confirmation import align_confirmation_predictions, apply_confirmation_overlay
-from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, bars_per_year, default_walk_forward_config
+from markov_regime.config import (
+    DataConfig,
+    ModelConfig,
+    StrategyConfig,
+    SweepConfig,
+    WalkForwardConfig,
+    bars_per_year,
+    default_asset_settings,
+    default_robustness_basket,
+    default_walk_forward_config,
+    infer_asset_class,
+)
 from markov_regime.data import DataFetchResult, fetch_live_quote, fetch_price_data, normalize_symbol
 from markov_regime.data import _redact_api_key, _resample_ohlcv
 from markov_regime.features import FEATURE_COLUMNS, FORWARD_HORIZONS, build_feature_frame, get_feature_columns, list_feature_packs
@@ -839,6 +850,12 @@ def test_bars_per_year_supports_4hour_crypto_calendar() -> None:
     assert bars_per_year("1day") == 365
 
 
+def test_bars_per_year_switches_to_equity_calendar_when_requested() -> None:
+    assert bars_per_year("1day", "equity") == 252
+    assert bars_per_year("4hour", "equity") == int(round(252 * (6.5 / 4.0)))
+    assert bars_per_year("1hour", "equity") == int(round(252 * 6.5))
+
+
 def test_default_walk_forward_config_prefers_higher_timeframe_windows() -> None:
     four_hour = default_walk_forward_config("4hour")
     one_day = default_walk_forward_config("1day")
@@ -851,6 +868,45 @@ def test_default_walk_forward_config_prefers_higher_timeframe_windows() -> None:
     assert one_day.validate_bars == 90
     assert one_day.test_bars == 90
     assert one_hour.train_bars == 720
+
+
+def test_default_walk_forward_config_is_asset_aware_for_equities() -> None:
+    equity_day = default_walk_forward_config("1day", "equity")
+    crypto_day = default_walk_forward_config("1day", "crypto")
+
+    assert equity_day.train_bars == 252
+    assert equity_day.validate_bars == 63
+    assert equity_day.test_bars == 63
+    assert crypto_day.train_bars == 365
+
+
+def test_infer_asset_class_and_defaults_switch_for_equities() -> None:
+    assert infer_asset_class("BTCUSD") == "crypto"
+    assert infer_asset_class("SPY") == "equity"
+
+    defaults = default_asset_settings("SPY")
+    assert defaults.asset_class == "equity"
+    assert defaults.interval == "1day"
+    assert defaults.feature_pack == "trend"
+    assert default_robustness_basket("SPY", "equity") == ("SPY", "QQQ", "IWM")
+
+
+def test_compute_metrics_uses_equity_annualization_from_frame_metadata() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=20, freq="D"),
+            "gross_strategy_return": [0.001] * 20,
+            "net_strategy_return": [0.001] * 20,
+            "turnover": [0.0] * 20,
+            "signal_position": [1] * 20,
+            "candidate_action": [1] * 20,
+            "asset_class": ["equity"] * 20,
+        }
+    )
+
+    metrics = compute_metrics(frame, "1day")
+
+    assert metrics["annualization_bars_per_year"] == 252.0
 
 
 def test_research_program_round_trip(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.config import DataConfig, HistoricalProvider, Interval, ModelConfig, StrategyConfig, WalkForwardConfig, default_walk_forward_config
 from markov_regime.data import fetch_price_data
 from markov_regime.features import build_feature_frame
+from markov_regime.strategy import infer_asset_class_from_frame
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
 
@@ -39,6 +40,7 @@ def run_multi_asset_robustness(
         try:
             fetched = fetch_price_data(DataConfig(symbol=symbol, interval=interval, limit=limit, provider=history_provider))
             feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
+            asset_class = infer_asset_class_from_frame(feature_frame)
             effective_walk_config, was_adjusted = (
                 suggest_walk_forward_config(len(feature_frame), walk_config)
                 if auto_adjust_windows
@@ -57,7 +59,7 @@ def run_multi_asset_robustness(
                     DataConfig(symbol=symbol, interval="1day", limit=limit, provider=history_provider)
                 )
                 confirmation_features = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
-                requested_confirmation_walk = default_walk_forward_config("1day")
+                requested_confirmation_walk = default_walk_forward_config("1day", infer_asset_class_from_frame(confirmation_features))
                 confirmation_walk_config, _ = (
                     suggest_walk_forward_config(len(confirmation_features), requested_confirmation_walk)
                     if auto_adjust_windows
@@ -99,6 +101,7 @@ def run_multi_asset_robustness(
                 {
                     "symbol": symbol,
                     "resolved_symbol": fetched.resolved_symbol,
+                    "asset_class": asset_class,
                     "status": "ok",
                     "raw_rows": len(fetched.frame),
                     "usable_rows": len(feature_frame),
@@ -125,6 +128,7 @@ def run_multi_asset_robustness(
                 {
                     "symbol": symbol,
                     "resolved_symbol": symbol,
+                    "asset_class": None,
                     "status": "error",
                     "error": str(exc),
                 }

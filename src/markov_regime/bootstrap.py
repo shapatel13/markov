@@ -5,7 +5,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from markov_regime.config import Interval, bars_per_year
+from markov_regime.config import AssetClass, Interval, bars_per_year
 
 
 def _return_metrics(returns: np.ndarray, annualization: int) -> dict[str, float]:
@@ -36,6 +36,7 @@ def _moving_block_indices(length: int, block_length: int, rng: np.random.Generat
 def block_bootstrap_confidence_intervals(
     returns: Iterable[float],
     interval: Interval,
+    asset_class: AssetClass = "crypto",
     block_length: int = 24,
     samples: int = 300,
     alpha: float = 0.1,
@@ -45,7 +46,7 @@ def block_bootstrap_confidence_intervals(
     if sampled_returns.size == 0:
         raise ValueError("Cannot bootstrap an empty return series.")
 
-    annualization = bars_per_year(interval)
+    annualization = bars_per_year(interval, asset_class)
     rng = np.random.default_rng(seed)
     point_estimate = _return_metrics(sampled_returns, annualization)
     bootstrap_rows: list[dict[str, float]] = []
@@ -70,4 +71,3 @@ def block_bootstrap_confidence_intervals(
             }
         )
     return pd.DataFrame(rows)
-

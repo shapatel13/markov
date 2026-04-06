@@ -10,8 +10,8 @@ POSITION_LABELS: dict[int, str] = {1: "Long", 0: "Flat", -1: "Short"}
 
 CONTROL_HELP: dict[str, str] = {
     "live_engine_mode": "Controls what the top live recommendation follows. `auto` uses the promoted engine, `baseline` forces the strongest simple reference, `hmm_ensemble` uses the seed/state-count consensus overlay, and `hmm_research` forces the raw HMM even when it is not promoted.",
-    "interval": "Primary research timeframe. `4hour` is the main trading lane, `1day` is slower confirmation, and `1hour` is the noisier baseline. Defaults now lean toward a 12-month train and 3-month blind test style on the higher timeframes.",
-    "provider": "Historical bar source. `auto` keeps Financial Modeling Prep as the primary source, then uses Coinbase deep-history backfill only when FMP's intraday crypto sample is too short, with Yahoo only as a last-resort fallback.",
+    "interval": "Primary research timeframe. Crypto defaults favor `4hour`, while stocks and ETFs auto-default to `1day` because market-hours intraday data is thinner and less stable than 24/7 crypto bars.",
+    "provider": "Historical bar source. `auto` keeps Financial Modeling Prep as the primary source, then uses Coinbase deep-history backfill only for crypto when FMP's intraday sample is too short, with Yahoo as the fallback path for equities or when other backfills fail.",
     "feature_pack": "Chooses what market features the HMM sees. Richer packs can improve regime separation, but they can also be more fragile.",
     "limit": "How many bars to keep after fetching and resampling. More history usually makes walk-forward conclusions less fragile, and `auto` provider mode may reach beyond FMP's recent intraday cap when needed.",
     "states": "Number of HMM regimes. Too few can blur distinct behavior; too many can over-segment noise.",

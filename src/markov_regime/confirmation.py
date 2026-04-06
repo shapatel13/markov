@@ -13,6 +13,7 @@ from markov_regime.strategy import (
     build_trade_table,
     compute_metrics,
     estimate_execution_cost_bps,
+    infer_asset_class_from_frame,
     stress_test_transaction_costs,
     summarize_trade_table,
 )
@@ -190,8 +191,9 @@ def _recompute_fold_diagnostics(
 
     updated = diagnostics.copy()
     metric_columns = set(updated.columns)
+    asset_class = infer_asset_class_from_frame(predictions)
     for fold_id, fold_frame in predictions.groupby("fold_id", sort=True):
-        metrics = compute_metrics(fold_frame, interval)
+        metrics = compute_metrics(fold_frame, interval, asset_class=asset_class)
         for metric_name, metric_value in metrics.items():
             if metric_name in metric_columns:
                 updated.loc[updated["fold_id"] == fold_id, metric_name] = metric_value
@@ -211,12 +213,14 @@ def apply_higher_timeframe_confirmation(
 
     aligned = align_confirmation_predictions(primary_result.predictions, confirmation_result.predictions, confirmation_interval)
     confirmed_predictions, confirmation_summary = apply_confirmation_overlay(aligned, strategy_config)
-    updated_metrics = compute_metrics(confirmed_predictions, interval)
+    asset_class = infer_asset_class_from_frame(confirmed_predictions)
+    updated_metrics = compute_metrics(confirmed_predictions, interval, asset_class=asset_class)
     updated_diagnostics = _recompute_fold_diagnostics(confirmed_predictions, primary_result.fold_diagnostics, interval)
     updated_cost_stress = stress_test_transaction_costs(confirmed_predictions, strategy_config.cost_grid, interval, strategy_config)
     updated_bootstrap = block_bootstrap_confidence_intervals(
         confirmed_predictions["net_strategy_return"],
         interval=interval,
+        asset_class=asset_class,
         block_length=max(strategy_config.signal_horizon * 2, 8),
     )
     updated_guardrail_summary = _guardrail_summary(confirmed_predictions)
@@ -229,7 +233,7 @@ def apply_higher_timeframe_confirmation(
         predictions=confirmed_predictions,
         fold_diagnostics=updated_diagnostics,
         metrics=updated_metrics,
-        benchmark_metrics=compute_metrics(build_buy_and_hold_frame(confirmed_predictions), interval),
+        benchmark_metrics=compute_metrics(build_buy_and_hold_frame(confirmed_predictions), interval, asset_class=asset_class),
         cost_stress=updated_cost_stress,
         bootstrap=updated_bootstrap,
         guardrail_summary=updated_guardrail_summary,

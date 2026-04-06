@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from markov_regime.config import Interval, StrategyConfig, SweepConfig, bars_per_year
+from markov_regime.config import AssetClass, Interval, StrategyConfig, SweepConfig, bars_per_year, infer_asset_class
 
 
 def _horizon_weights(horizons: tuple[int, ...]) -> dict[int, float]:
@@ -450,12 +450,28 @@ def summarize_trade_table(trade_table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def compute_metrics(signal_frame: pd.DataFrame, interval: Interval) -> dict[str, float]:
+def infer_asset_class_from_frame(signal_frame: pd.DataFrame, default: AssetClass = "crypto") -> AssetClass:
+    if "asset_class" in signal_frame.columns:
+        non_null = signal_frame["asset_class"].dropna()
+        if not non_null.empty:
+            value = str(non_null.iloc[0]).strip().lower()
+            if value in {"crypto", "equity"}:
+                return value  # type: ignore[return-value]
+    for column in ("resolved_symbol", "symbol"):
+        if column in signal_frame.columns:
+            non_null = signal_frame[column].dropna()
+            if not non_null.empty:
+                return infer_asset_class(str(non_null.iloc[0]))
+    return default
+
+
+def compute_metrics(signal_frame: pd.DataFrame, interval: Interval, asset_class: AssetClass | None = None) -> dict[str, float]:
     returns = signal_frame["net_strategy_return"].fillna(0.0)
     if returns.empty:
         raise ValueError("Cannot compute metrics for an empty signal frame.")
 
-    annualization = bars_per_year(interval)
+    resolved_asset_class = asset_class or infer_asset_class_from_frame(signal_frame)
+    annualization = bars_per_year(interval, resolved_asset_class)
     cumulative_wealth = (1.0 + returns).cumprod()
     total_return = float(cumulative_wealth.iloc[-1] - 1.0)
     annualized_return = float((1.0 + total_return) ** (annualization / max(len(returns), 1)) - 1.0) if total_return > -1.0 else -1.0
@@ -478,6 +494,7 @@ def compute_metrics(signal_frame: pd.DataFrame, interval: Interval) -> dict[str,
     trades = float(len(trade_table))
 
     return {
+        "annualization_bars_per_year": float(annualization),
         "total_return": total_return,
         "annualized_return": annualized_return,
         "annualized_volatility": annualized_volatility,
@@ -502,6 +519,7 @@ def stress_test_transaction_costs(
     config: StrategyConfig,
 ) -> pd.DataFrame:
     rows: list[dict[str, float]] = []
+    asset_class = infer_asset_class_from_frame(signal_frame)
     gross_return = signal_frame["gross_strategy_return"].fillna(0.0)
     turnover = signal_frame["turnover"].fillna(0.0)
     for cost_bps in cost_grid:
@@ -510,7 +528,7 @@ def stress_test_transaction_costs(
         stressed["transaction_cost"] = turnover * (stressed["execution_cost_bps"] / 10_000.0)
         stressed["net_strategy_return"] = gross_return - stressed["transaction_cost"]
         stressed["strategy_wealth"] = (1.0 + stressed["net_strategy_return"]).cumprod()
-        metrics = compute_metrics(stressed, interval)
+        metrics = compute_metrics(stressed, interval, asset_class=asset_class)
         metrics["cost_bps"] = float(cost_bps)
         rows.append(metrics)
     return pd.DataFrame(rows).sort_values("cost_bps").reset_index(drop=True)
@@ -588,7 +606,7 @@ def replay_strategy(
         from markov_regime.consensus import apply_consensus_overlay
 
         combined, _ = apply_consensus_overlay(combined, config)
-    return combined, compute_metrics(combined, interval)
+    return combined, compute_metrics(combined, interval, asset_class=infer_asset_class_from_frame(predictions))
 
 
 def parameter_sweep(

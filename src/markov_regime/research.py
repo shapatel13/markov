@@ -27,7 +27,7 @@ from markov_regime.features import FEATURE_COLUMNS, build_feature_frame, get_fea
 from markov_regime.interpretation import build_promotion_gate_rows, recommend_strategy_engine, summarize_promotion_gates
 from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
-from markov_regime.strategy import parameter_sweep, replay_strategy
+from markov_regime.strategy import infer_asset_class_from_frame, parameter_sweep, replay_strategy
 from markov_regime.walkforward import run_walk_forward, suggest_walk_forward_config
 
 
@@ -259,7 +259,7 @@ def _resolve_walk_config(
     interval: Interval,
     auto_adjust_windows: bool,
 ) -> tuple[WalkForwardConfig, bool]:
-    requested = default_walk_forward_config(interval)
+    requested = default_walk_forward_config(interval, infer_asset_class_from_frame(feature_frame))
     if not auto_adjust_windows:
         return requested, False
     return suggest_walk_forward_config(len(feature_frame), requested)

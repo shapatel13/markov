@@ -6,6 +6,7 @@ from typing import Literal
 Interval = Literal["1hour", "4hour", "1day"]
 ConsensusGateMode = Literal["hard", "entry_only"]
 HistoricalProvider = Literal["auto", "fmp", "coinbase", "yahoo"]
+AssetClass = Literal["crypto", "equity"]
 
 
 @dataclass(frozen=True)
@@ -72,8 +73,110 @@ class SweepConfig:
     required_confirmations: tuple[int, ...] = (1, 2, 3, 4)
 
 
-def bars_per_year(interval: Interval) -> int:
-    # This project is now crypto-first, so annualization assumes 24/7 bars.
+CRYPTO_ALIASES: set[str] = {
+    "BTC",
+    "BTC-USD",
+    "BTCUSD",
+    "ETH",
+    "ETH-USD",
+    "ETHUSD",
+    "SOL",
+    "SOL-USD",
+    "SOLUSD",
+    "DOGE",
+    "DOGE-USD",
+    "DOGEUSD",
+    "ADA",
+    "ADA-USD",
+    "ADAUSD",
+    "XRP",
+    "XRP-USD",
+    "XRPUSD",
+    "BNB",
+    "BNB-USD",
+    "BNBUSD",
+}
+
+
+@dataclass(frozen=True)
+class AssetDefaults:
+    asset_class: AssetClass
+    interval: Interval
+    feature_pack: str
+    limit: int
+    robustness_symbols: tuple[str, ...]
+    cost_bps: float
+    spread_bps: float
+    slippage_bps: float
+    impact_bps: float
+    require_daily_confirmation: bool
+    provider: HistoricalProvider = "auto"
+
+
+def infer_asset_class(symbol: str) -> AssetClass:
+    cleaned = str(symbol).strip().upper()
+    if cleaned in CRYPTO_ALIASES:
+        return "crypto"
+    if cleaned.endswith("-USD") and cleaned[:-4].isalpha():
+        return "crypto"
+    if cleaned.endswith("USD") and cleaned[:-3].isalpha() and len(cleaned[:-3]) >= 2:
+        return "crypto"
+    return "equity"
+
+
+def asset_class_label(asset_class: AssetClass) -> str:
+    return "crypto (24/7)" if asset_class == "crypto" else "equity / ETF (market hours)"
+
+
+def default_robustness_basket(symbol: str, asset_class: AssetClass | None = None) -> tuple[str, ...]:
+    resolved_asset_class = asset_class or infer_asset_class(symbol)
+    cleaned = str(symbol).strip().upper()
+    if resolved_asset_class == "crypto":
+        candidates = [cleaned, "BTCUSD", "ETHUSD", "SOLUSD"]
+    else:
+        candidates = [cleaned, "SPY", "QQQ", "IWM"]
+    deduped = list(dict.fromkeys(item for item in candidates if item))
+    return tuple(deduped[:3] if len(deduped) >= 3 else deduped)
+
+
+def default_asset_settings(symbol: str) -> AssetDefaults:
+    asset_class = infer_asset_class(symbol)
+    if asset_class == "crypto":
+        return AssetDefaults(
+            asset_class="crypto",
+            interval="4hour",
+            feature_pack="mean_reversion",
+            limit=5000,
+            robustness_symbols=default_robustness_basket(symbol, asset_class),
+            cost_bps=10.0,
+            spread_bps=4.0,
+            slippage_bps=3.0,
+            impact_bps=2.0,
+            require_daily_confirmation=False,
+            provider="auto",
+        )
+    return AssetDefaults(
+        asset_class="equity",
+        interval="1day",
+        feature_pack="trend",
+        limit=3000,
+        robustness_symbols=default_robustness_basket(symbol, "equity"),
+        cost_bps=0.0,
+        spread_bps=1.0,
+        slippage_bps=1.0,
+        impact_bps=0.5,
+        require_daily_confirmation=False,
+        provider="auto",
+    )
+
+
+def bars_per_year(interval: Interval, asset_class: AssetClass = "crypto") -> int:
+    if asset_class == "equity":
+        if interval == "1day":
+            return 252
+        if interval == "4hour":
+            return int(round(252 * (6.5 / 4.0)))
+        return int(round(252 * 6.5))
     if interval == "1day":
         return 365
     if interval == "4hour":
@@ -81,7 +184,34 @@ def bars_per_year(interval: Interval) -> int:
     return 365 * 24
 
 
-def default_walk_forward_config(interval: Interval) -> WalkForwardConfig:
+def default_walk_forward_config(interval: Interval, asset_class: AssetClass = "crypto") -> WalkForwardConfig:
+    if asset_class == "equity":
+        if interval == "4hour":
+            return WalkForwardConfig(
+                train_bars=int(round(252 * (6.5 / 4.0))),
+                purge_bars=2,
+                validate_bars=int(round(63 * (6.5 / 4.0))),
+                embargo_bars=2,
+                test_bars=int(round(63 * (6.5 / 4.0))),
+                refit_stride_bars=int(round(63 * (6.5 / 4.0))),
+            )
+        if interval == "1day":
+            return WalkForwardConfig(
+                train_bars=252,
+                purge_bars=2,
+                validate_bars=63,
+                embargo_bars=2,
+                test_bars=63,
+                refit_stride_bars=63,
+            )
+        return WalkForwardConfig(
+            train_bars=int(round(252 * 6.5)),
+            purge_bars=6,
+            validate_bars=int(round(63 * 6.5)),
+            embargo_bars=6,
+            test_bars=int(round(63 * 6.5)),
+            refit_stride_bars=int(round(63 * 6.5)),
+        )
     if interval == "4hour":
         return WalkForwardConfig(
             train_bars=365 * 6,

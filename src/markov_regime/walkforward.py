@@ -25,6 +25,7 @@ from markov_regime.strategy import (
     build_trade_table,
     compute_metrics,
     derive_state_actions,
+    infer_asset_class_from_frame,
     stress_test_transaction_costs,
     summarize_trade_table,
 )
@@ -278,7 +279,7 @@ def run_walk_forward(
         signal_frame["is_blind_oos"] = True
         prediction_frames.append(signal_frame)
 
-        fold_metrics = compute_metrics(signal_frame, interval)
+        fold_metrics = compute_metrics(signal_frame, interval, asset_class=infer_asset_class_from_frame(test_aligned))
         log_likelihood, aic, bic = information_criteria(fitted, train_frame, feature_columns)
         fold_rows.append(
             {
@@ -319,12 +320,14 @@ def run_walk_forward(
     diagnostics = pd.DataFrame(fold_rows)
     state_detail_frame = pd.concat(state_rows).reset_index(drop=True)
     stability = _state_stability_table(state_detail_frame)
-    metrics = compute_metrics(predictions, interval)
-    benchmark_metrics = compute_metrics(build_buy_and_hold_frame(predictions), interval)
+    asset_class = infer_asset_class_from_frame(predictions)
+    metrics = compute_metrics(predictions, interval, asset_class=asset_class)
+    benchmark_metrics = compute_metrics(build_buy_and_hold_frame(predictions), interval, asset_class=asset_class)
     cost_stress = stress_test_transaction_costs(predictions, strategy_config.cost_grid, interval, strategy_config)
     bootstrap = block_bootstrap_confidence_intervals(
         predictions["net_strategy_return"],
         interval=interval,
+        asset_class=asset_class,
         block_length=max(strategy_config.signal_horizon * 2, 8),
     )
     forward_returns = _summarize_forward_returns(predictions)

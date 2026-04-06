@@ -12,7 +12,18 @@ SRC_PATH = ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from markov_regime.config import DataConfig, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
+from markov_regime.config import (
+    DataConfig,
+    ModelConfig,
+    StrategyConfig,
+    SweepConfig,
+    WalkForwardConfig,
+    asset_class_label,
+    default_asset_settings,
+    default_robustness_basket,
+    default_walk_forward_config,
+    infer_asset_class,
+)
 from markov_regime.artifacts import write_run_artifact_bundle
 from markov_regime.baselines import baseline_display_name, build_baseline_execution_plan, select_best_baseline_frame
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
@@ -108,7 +119,7 @@ st.markdown(
 )
 
 st.title("Markov Regime Research")
-st.caption("FMP-first workflow with live quotes, blind out-of-sample walk-forward diagnostics, explicit guardrails, and optional deep-history backfill only when FMP intraday crypto history is too short.")
+st.caption("FMP-first workflow with live quotes, blind out-of-sample walk-forward diagnostics, explicit guardrails, and automatic asset-aware defaults for crypto versus stocks and ETFs.")
 
 
 def _provider_label(option: str) -> str:
@@ -131,6 +142,40 @@ def _engine_mode_label(option: str) -> str:
     return labels.get(option, option)
 
 
+def _apply_asset_aware_sidebar_defaults(feature_pack_options: list[str]) -> str:
+    current_symbol = str(st.session_state.get("symbol_input", "BTCUSD") or "BTCUSD").upper()
+    defaults = default_asset_settings(current_symbol)
+    marker = f"{current_symbol}|{defaults.asset_class}"
+
+    if st.session_state.get("_asset_defaults_marker") != marker:
+        st.session_state["interval_input"] = defaults.interval
+        st.session_state["provider_input"] = defaults.provider
+        st.session_state["feature_pack_input"] = defaults.feature_pack if defaults.feature_pack in feature_pack_options else feature_pack_options[0]
+        st.session_state["limit_input"] = defaults.limit
+        st.session_state["cost_bps_input"] = defaults.cost_bps
+        st.session_state["spread_bps_input"] = defaults.spread_bps
+        st.session_state["slippage_bps_input"] = defaults.slippage_bps
+        st.session_state["impact_bps_input"] = defaults.impact_bps
+        st.session_state["robustness_symbols_input"] = ",".join(defaults.robustness_symbols)
+        st.session_state["require_daily_confirmation_input"] = defaults.require_daily_confirmation
+        st.session_state["_asset_defaults_marker"] = marker
+
+    current_interval = str(st.session_state.get("interval_input", defaults.interval))
+    walk_marker = f"{marker}|{current_interval}"
+    if st.session_state.get("_walk_defaults_marker") != walk_marker:
+        walk_defaults = default_walk_forward_config(current_interval, defaults.asset_class)
+        st.session_state["train_bars_input"] = walk_defaults.train_bars
+        st.session_state["purge_bars_input"] = walk_defaults.purge_bars
+        st.session_state["validate_bars_input"] = walk_defaults.validate_bars
+        st.session_state["embargo_bars_input"] = walk_defaults.embargo_bars
+        st.session_state["test_bars_input"] = walk_defaults.test_bars
+        st.session_state["refit_stride_input"] = walk_defaults.refit_stride_bars
+        st.session_state["_walk_defaults_marker"] = walk_marker
+
+    st.session_state["_current_asset_class"] = defaults.asset_class
+    return defaults.asset_class
+
+
 engine_mode = st.sidebar.selectbox(
     "Live engine mode",
     options=["auto", "baseline", "hmm_ensemble", "hmm_research"],
@@ -138,42 +183,57 @@ engine_mode = st.sidebar.selectbox(
     format_func=_engine_mode_label,
     help=CONTROL_HELP["live_engine_mode"],
 )
+auto_asset_defaults = st.sidebar.checkbox(
+    "Auto asset-aware defaults",
+    value=True,
+    key="auto_asset_defaults",
+    help="When enabled, changing the symbol automatically switches interval, feature pack, cost assumptions, walk-forward defaults, and robustness basket to a crypto-aware or equity-aware profile.",
+)
+
+if "symbol_input" not in st.session_state:
+    st.session_state["symbol_input"] = "BTCUSD"
+
+feature_pack_options = list(list_feature_packs())
+current_asset_class = _apply_asset_aware_sidebar_defaults(feature_pack_options) if auto_asset_defaults else infer_asset_class(str(st.session_state.get("symbol_input", "BTCUSD")))
+asset_defaults = default_asset_settings(str(st.session_state.get("symbol_input", "BTCUSD") or "BTCUSD"))
+st.sidebar.caption(
+    f"Detected asset class: {asset_class_label(current_asset_class)}. "
+    f"Auto profile favors `{asset_defaults.interval}` with `{asset_defaults.feature_pack}` and robustness basket `{', '.join(asset_defaults.robustness_symbols)}`."
+)
 
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
-    st.caption("Default preset: BTC 4H `mean_reversion`, 8 states, auto provider with FMP primary. The daily lane remains available as context, but it is not a hard veto by default.")
-    feature_pack_options = list(list_feature_packs())
-    symbol = st.text_input("Symbol", value="BTCUSD").upper()
-    interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], index=0, help=CONTROL_HELP["interval"])
+    st.caption("The sidebar now auto-detects crypto versus equities and reseeds interval, feature pack, costs, and robustness defaults when the symbol changes.")
+    symbol = st.text_input("Symbol", key="symbol_input").upper()
+    interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], help=CONTROL_HELP["interval"], key="interval_input")
     history_provider = st.selectbox(
         "Historical provider",
         options=["auto", "fmp", "coinbase", "yahoo"],
-        index=0,
         format_func=_provider_label,
         help=CONTROL_HELP["provider"],
+        key="provider_input",
     )
-    default_walk = default_walk_forward_config(interval)
     feature_pack = st.selectbox(
         "Feature pack",
         options=feature_pack_options,
-        index=feature_pack_options.index("mean_reversion") if "mean_reversion" in feature_pack_options else 0,
         help=CONTROL_HELP["feature_pack"],
+        key="feature_pack_input",
     )
-    limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, value=5000, step=100, help=CONTROL_HELP["limit"])
+    limit = st.number_input("Bars to fetch", min_value=300, max_value=10000, step=100, help=CONTROL_HELP["limit"], key="limit_input")
     selected_states = st.select_slider("Selected HMM states", options=[5, 6, 7, 8, 9], value=8, help=CONTROL_HELP["states"])
-    train_bars = st.number_input("Train bars", min_value=120, max_value=5000, value=default_walk.train_bars, step=12, help=CONTROL_HELP["train_bars"])
-    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, value=default_walk.purge_bars, step=1, help=CONTROL_HELP["purge_bars"])
-    validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, value=default_walk.validate_bars, step=12, help=CONTROL_HELP["validate_bars"])
-    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, value=default_walk.embargo_bars, step=1, help=CONTROL_HELP["embargo_bars"])
-    test_bars = st.number_input("Test bars", min_value=24, max_value=1500, value=default_walk.test_bars, step=12, help=CONTROL_HELP["test_bars"])
-    refit_stride = st.number_input("Refit stride", min_value=24, max_value=1500, value=default_walk.refit_stride_bars, step=12, help=CONTROL_HELP["refit_stride"])
+    train_bars = st.number_input("Train bars", min_value=120, max_value=5000, step=12, help=CONTROL_HELP["train_bars"], key="train_bars_input")
+    purge_bars = st.number_input("Purge bars", min_value=0, max_value=240, step=1, help=CONTROL_HELP["purge_bars"], key="purge_bars_input")
+    validate_bars = st.number_input("Validate bars", min_value=24, max_value=1500, step=12, help=CONTROL_HELP["validate_bars"], key="validate_bars_input")
+    embargo_bars = st.number_input("Embargo bars", min_value=0, max_value=240, step=1, help=CONTROL_HELP["embargo_bars"], key="embargo_bars_input")
+    test_bars = st.number_input("Test bars", min_value=24, max_value=1500, step=12, help=CONTROL_HELP["test_bars"], key="test_bars_input")
+    refit_stride = st.number_input("Refit stride", min_value=24, max_value=1500, step=12, help=CONTROL_HELP["refit_stride"], key="refit_stride_input")
     posterior_threshold = st.slider("Posterior threshold", min_value=0.5, max_value=0.9, value=0.7, step=0.01, help=CONTROL_HELP["posterior_threshold"])
     min_hold_bars = st.slider("Min hold bars", min_value=1, max_value=24, value=6, help=CONTROL_HELP["min_hold_bars"])
     cooldown_bars = st.slider("Cooldown bars", min_value=0, max_value=24, value=4, help=CONTROL_HELP["cooldown_bars"])
     required_confirmations = st.slider("Required confirmations", min_value=1, max_value=6, value=2, help=CONTROL_HELP["required_confirmations"])
     confidence_gap = st.slider("Top-two posterior gap", min_value=0.0, max_value=0.25, value=0.06, step=0.01, help=CONTROL_HELP["confidence_gap"])
     allow_short = st.checkbox("Allow short trades", value=False, help=CONTROL_HELP["allow_short"])
-    require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", value=False, help=CONTROL_HELP["require_daily_confirmation"])
+    require_daily_confirmation = st.checkbox("Require daily confirmation for 4H trades", help=CONTROL_HELP["require_daily_confirmation"], key="require_daily_confirmation_input")
     require_consensus_confirmation = st.checkbox("Require consensus confirmation", value=False, help=CONTROL_HELP["require_consensus_confirmation"])
     consensus_gate_mode = st.selectbox(
         "Consensus gate mode",
@@ -182,11 +242,11 @@ with st.sidebar.form("controls"):
         help=CONTROL_HELP["consensus_gate_mode"],
     )
     consensus_min_share = st.slider("Consensus min share", min_value=0.5, max_value=1.0, value=0.67, step=0.01, help=CONTROL_HELP["consensus_min_share"])
-    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, value=10.0, step=0.5, help=CONTROL_HELP["cost_bps"])
-    spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, value=4.0, step=0.5, help=CONTROL_HELP["spread_bps"])
-    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, help=CONTROL_HELP["slippage_bps"])
-    impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, value=2.0, step=0.5, help=CONTROL_HELP["impact_bps"])
-    robustness_symbols = st.text_input("Robustness basket", value="BTCUSD,ETHUSD,SOLUSD")
+    cost_bps = st.slider("Trading fee (bps)", min_value=0.0, max_value=25.0, step=0.5, help=CONTROL_HELP["cost_bps"], key="cost_bps_input")
+    spread_bps = st.slider("Spread estimate (bps)", min_value=0.0, max_value=30.0, step=0.5, help=CONTROL_HELP["spread_bps"], key="spread_bps_input")
+    slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, step=0.5, help=CONTROL_HELP["slippage_bps"], key="slippage_bps_input")
+    impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, step=0.5, help=CONTROL_HELP["impact_bps"], key="impact_bps_input")
+    robustness_symbols = st.text_input("Robustness basket", key="robustness_symbols_input")
     run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
     run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
     run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
@@ -204,6 +264,7 @@ if run_clicked:
     try:
         with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
             data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit), provider=history_provider)
+            current_asset_class = infer_asset_class(symbol)
             model_config = ModelConfig(n_states=selected_states)
             feature_columns = get_feature_columns(feature_pack)
             requested_walk_config = WalkForwardConfig(
@@ -254,9 +315,9 @@ if run_clicked:
                 confirmation_fetched = fetch_price_data(confirmation_data_config)
                 confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
                 confirmation_walk_config, _ = (
-                    suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day"))
+                    suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day", current_asset_class))
                     if auto_adjust_windows
-                    else (default_walk_forward_config("1day"), False)
+                    else (default_walk_forward_config("1day", current_asset_class), False)
                 )
                 _, confirmation_results_by_state = compare_state_counts(
                     feature_frame=confirmation_feature_frame,
@@ -457,6 +518,7 @@ if run_clicked:
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
+                "asset_class": current_asset_class,
                 "interval": interval,
                 "data_config": data_config,
                 "model_config": model_config,
@@ -785,6 +847,10 @@ st.caption("Headline metrics are stitched only from blind test windows. Training
 st.caption(
     f"Latest guardrail status: `{guardrail_text}` | Historical provider: `{_provider_label(str(analysis.get('data_provider', 'n/a')))}` | Data request: `{analysis['data_url']}`"
 )
+st.caption(
+    f"Detected asset class: `{asset_class_label(str(analysis.get('asset_class', 'crypto')) if analysis.get('asset_class') else 'crypto')}` "
+    f"| Annualization basis: `{int(float(selected_result.metrics.get('annualization_bars_per_year', 0.0)))} bars/year`"
+)
 if analysis.get("data_provider_note"):
     st.info(f"Historical provider note: {analysis['data_provider_note']}")
 if selected_result.converged_ratio < 1.0:
@@ -984,6 +1050,16 @@ with methodology_tab:
     st.subheader("Methodology Summary")
     methodology_rows = pd.DataFrame(
         [
+            {
+                "component": "Detected Asset Class",
+                "value": asset_class_label(str(analysis.get("asset_class", "crypto"))),
+                "interpretation": "The app now auto-detects crypto versus equities and adjusts annualization, walk-forward defaults, cost assumptions, and robustness suggestions accordingly.",
+            },
+            {
+                "component": "Annualization Basis",
+                "value": f"{int(float(selected_result.metrics.get('annualization_bars_per_year', 0.0)))} bars/year",
+                "interpretation": "Annualized return and volatility use a crypto 24/7 calendar for crypto symbols and a market-hours approximation for stocks and ETFs.",
+            },
             {
                 "component": "Historical Provider",
                 "value": _provider_label(str(analysis.get("data_provider", "n/a"))),

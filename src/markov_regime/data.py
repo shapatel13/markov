@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from markov_regime.config import DataConfig, HistoricalProvider
+from markov_regime.config import AssetClass, DataConfig, HistoricalProvider, infer_asset_class
 
 
 @dataclass(frozen=True)
@@ -241,6 +241,14 @@ def _normalize_quote(payload: Any) -> dict[str, Any]:
     return quote
 
 
+def _attach_market_metadata(frame: pd.DataFrame, resolved_symbol: str) -> pd.DataFrame:
+    asset_class: AssetClass = infer_asset_class(resolved_symbol)
+    enriched = frame.copy()
+    enriched["resolved_symbol"] = resolved_symbol
+    enriched["asset_class"] = asset_class
+    return enriched
+
+
 def _resample_ohlcv(frame: pd.DataFrame, interval: str) -> pd.DataFrame:
     if interval != "4hour":
         return frame
@@ -316,7 +324,7 @@ def _fetch_fmp_price_data(
     else:
         raise ValueError(f"Unable to fetch price data from Financial Modeling Prep: {last_error}") from last_error
 
-    frame = _apply_time_filters(_normalize_frame(payload, config.interval), config)
+    frame = _attach_market_metadata(_apply_time_filters(_normalize_frame(payload, config.interval), config), resolved_symbol)
     return DataFetchResult(
         frame=frame,
         source_url=_redact_api_key(response.url) if response else candidate_urls[0],
@@ -355,7 +363,7 @@ def _fetch_yahoo_price_data(
 
     response = client.get(url, params=params, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
-    frame = _apply_time_filters(_normalize_yahoo_frame(response.json(), config.interval), config)
+    frame = _attach_market_metadata(_apply_time_filters(_normalize_yahoo_frame(response.json(), config.interval), config), resolved_symbol)
     return DataFetchResult(
         frame=frame,
         source_url=response.url,
@@ -463,7 +471,7 @@ def _fetch_coinbase_price_data(
         .drop_duplicates(subset="timestamp")
         .reset_index(drop=True)
     )
-    frame = _apply_time_filters(combined, config)
+    frame = _attach_market_metadata(_apply_time_filters(combined, config), resolved_symbol)
     return DataFetchResult(
         frame=frame,
         source_url=last_url,
@@ -500,12 +508,52 @@ def fetch_price_data(
         return _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
 
     if fmp_key is None:
-        try:
-            return _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
-        except Exception:
-            return _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+        if _is_crypto_symbol(resolved_symbol):
+            try:
+                return _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+            except Exception:
+                return _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+        return _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
 
-    fmp_result = _fetch_fmp_price_data(config=config, key=fmp_key, client=client, resolved_symbol=resolved_symbol)
+    fmp_error: Exception | None = None
+    try:
+        fmp_result = _fetch_fmp_price_data(config=config, key=fmp_key, client=client, resolved_symbol=resolved_symbol)
+    except Exception as exc:
+        fmp_error = exc
+        fmp_result = None
+
+    if fmp_result is None:
+        if _is_crypto_symbol(resolved_symbol):
+            try:
+                fallback = _fetch_coinbase_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+                return DataFetchResult(
+                    frame=fallback.frame,
+                    source_url=fallback.source_url,
+                    requested_symbol=config.symbol,
+                    resolved_symbol=resolved_symbol,
+                    provider=fallback.provider,
+                    provider_note="Auto-kept Financial Modeling Prep as the primary source but fell back because the FMP fetch failed.",
+                )
+            except Exception:
+                yahoo_result = _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+                return DataFetchResult(
+                    frame=yahoo_result.frame,
+                    source_url=yahoo_result.source_url,
+                    requested_symbol=config.symbol,
+                    resolved_symbol=resolved_symbol,
+                    provider=yahoo_result.provider,
+                    provider_note="Auto-kept Financial Modeling Prep as the primary source but used Yahoo fallback because the FMP and Coinbase fetches failed.",
+                )
+        yahoo_result = _fetch_yahoo_price_data(config=config, client=client, resolved_symbol=resolved_symbol)
+        return DataFetchResult(
+            frame=yahoo_result.frame,
+            source_url=yahoo_result.source_url,
+            requested_symbol=config.symbol,
+            resolved_symbol=resolved_symbol,
+            provider=yahoo_result.provider,
+            provider_note=f"Auto-kept Financial Modeling Prep as the primary source but used Yahoo fallback because the FMP fetch failed: {fmp_error}",
+        )
+
     if not _should_try_long_history_fallback(fmp_result.frame, config, resolved_symbol):
         return fmp_result
 

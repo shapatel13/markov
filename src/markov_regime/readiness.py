@@ -11,7 +11,18 @@ from typing import Any, Mapping
 import pandas as pd
 
 from markov_regime.artifacts import write_run_artifact_bundle
-from markov_regime.config import DataConfig, HistoricalProvider, Interval, ModelConfig, StrategyConfig, SweepConfig, WalkForwardConfig, default_walk_forward_config
+from markov_regime.config import (
+    DataConfig,
+    HistoricalProvider,
+    Interval,
+    ModelConfig,
+    StrategyConfig,
+    SweepConfig,
+    WalkForwardConfig,
+    default_robustness_basket,
+    default_walk_forward_config,
+    infer_asset_class,
+)
 from markov_regime.confirmation import apply_higher_timeframe_confirmation
 from markov_regime.consensus import apply_consensus_confirmation, compare_consensus_gate_modes, run_consensus_diagnostics
 from markov_regime.data import LiveQuote, fetch_live_quote, fetch_price_data
@@ -204,13 +215,15 @@ def run_primetime_audit(
     strategy_config: StrategyConfig | None = None,
     walk_config: WalkForwardConfig | None = None,
     strict_windows: bool = False,
-    robustness_symbols: tuple[str, ...] = ("BTCUSD", "ETHUSD", "SOLUSD"),
+    robustness_symbols: tuple[str, ...] = (),
     freshness_threshold_seconds: float = 120.0,
 ) -> PrimetimeAuditResult:
     repo_path = Path(repo_root)
     created_at = pd.Timestamp.utcnow()
     active_strategy = strategy_config or _app_default_strategy_config()
-    requested_walk = walk_config or default_walk_forward_config(interval)
+    asset_class = infer_asset_class(symbol)
+    requested_walk = walk_config or default_walk_forward_config(interval, asset_class)
+    effective_robustness_symbols = robustness_symbols or default_robustness_basket(symbol, asset_class)
 
     tests_passed, pytest_output = _run_command([sys.executable, "-m", "pytest", "-q"], repo_path)
     compile_passed, compile_output = _run_command([sys.executable, "-m", "compileall", "src", "app.py"], repo_path)
@@ -247,9 +260,9 @@ def run_primetime_audit(
         confirmation_fetched = fetch_price_data(confirmation_data_config)
         confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
         confirmation_walk_config, _ = (
-            (default_walk_forward_config("1day"), False)
+            (default_walk_forward_config("1day", infer_asset_class(symbol)), False)
             if strict_windows
-            else suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day"))
+            else suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day", infer_asset_class(symbol)))
         )
         _, confirmation_results_by_state = compare_state_counts(
             feature_frame=confirmation_feature_frame,
@@ -307,7 +320,7 @@ def run_primetime_audit(
         interval=interval,
     )
     robustness = run_multi_asset_robustness(
-        symbols=parse_symbol_list(robustness_symbols),
+        symbols=parse_symbol_list(effective_robustness_symbols),
         interval=interval,
         limit=limit,
         history_provider=history_provider,
