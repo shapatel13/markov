@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 
 import pandas as pd
 import streamlit as st
@@ -60,6 +61,7 @@ from markov_regime.research import (
 from markov_regime.reporting import export_signal_report
 from markov_regime.research_notes import build_research_notes
 from markov_regime.robustness import parse_symbol_list, run_multi_asset_robustness
+from markov_regime.runtime import AnalysisPlan, resolve_analysis_plan
 from markov_regime.strategy import parameter_sweep
 from markov_regime.ui import (
     plot_baseline_comparison,
@@ -87,6 +89,167 @@ st.set_page_config(page_title="Markov Regime Research", layout="wide")
 @st.cache_data(ttl=15, show_spinner=False)
 def load_live_quote_cached(symbol: str):
     return fetch_live_quote(symbol)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_price_data_cached(data_config: DataConfig):
+    return fetch_price_data(data_config)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def build_feature_frame_cached(price_frame: pd.DataFrame, feature_columns: tuple[str, ...]):
+    return build_feature_frame(price_frame, feature_columns=feature_columns)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def compare_state_counts_cached(
+    feature_frame: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    interval: str,
+    model_config: ModelConfig,
+    walk_config: WalkForwardConfig,
+    strategy_config: StrategyConfig,
+    state_values: tuple[int, ...],
+):
+    state_range = range(int(state_values[0]), int(state_values[-1]) + 1)
+    return compare_state_counts(
+        feature_frame=feature_frame,
+        feature_columns=feature_columns,
+        interval=interval,
+        model_config=model_config,
+        walk_config=walk_config,
+        strategy_config=strategy_config,
+        state_range=state_range,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def run_multi_asset_robustness_cached(
+    symbols: tuple[str, ...],
+    interval: str,
+    limit: int,
+    history_provider: str,
+    feature_columns: tuple[str, ...],
+    model_config: ModelConfig,
+    walk_config: WalkForwardConfig,
+    strategy_config: StrategyConfig,
+    auto_adjust_windows: bool,
+):
+    return run_multi_asset_robustness(
+        symbols=symbols,
+        interval=interval,
+        limit=limit,
+        history_provider=history_provider,
+        feature_columns=feature_columns,
+        model_config=model_config,
+        walk_config=walk_config,
+        strategy_config=strategy_config,
+        auto_adjust_windows=auto_adjust_windows,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def run_timeframe_comparison_cached(
+    symbol: str,
+    limit: int,
+    history_provider: str,
+    model_config: ModelConfig,
+    strategy_config: StrategyConfig,
+    feature_pack: str,
+    feature_columns: tuple[str, ...],
+    auto_adjust_windows: bool,
+):
+    return run_timeframe_comparison(
+        symbol=symbol,
+        limit=limit,
+        history_provider=history_provider,
+        model_config=model_config,
+        strategy_config=strategy_config,
+        feature_pack=feature_pack,
+        feature_columns=feature_columns,
+        auto_adjust_windows=auto_adjust_windows,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def run_feature_pack_comparison_cached(
+    price_frame: pd.DataFrame,
+    interval: str,
+    model_config: ModelConfig,
+    strategy_config: StrategyConfig,
+    symbol: str | None,
+    limit: int | None,
+    history_provider: str,
+    auto_adjust_windows: bool,
+):
+    return run_feature_pack_comparison(
+        price_frame=price_frame,
+        interval=interval,
+        model_config=model_config,
+        strategy_config=strategy_config,
+        symbol=symbol,
+        limit=limit,
+        history_provider=history_provider,
+        auto_adjust_windows=auto_adjust_windows,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def run_consensus_diagnostics_cached(
+    symbol: str,
+    interval: str,
+    limit: int,
+    history_provider: str,
+    feature_columns: tuple[str, ...],
+    model_config: ModelConfig,
+    strategy_config: StrategyConfig,
+    auto_adjust_windows: bool,
+):
+    return run_consensus_diagnostics(
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        history_provider=history_provider,
+        feature_columns=feature_columns,
+        model_config=model_config,
+        strategy_config=strategy_config,
+        auto_adjust_windows=auto_adjust_windows,
+    )
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def run_candidate_search_cached(
+    symbol: str,
+    interval: str,
+    limit: int,
+    history_provider: str,
+    base_model_config: ModelConfig,
+    base_strategy_config: StrategyConfig,
+    feature_packs: tuple[str, ...],
+    state_counts: tuple[int, ...],
+    short_modes: tuple[bool, ...],
+    confirmation_modes: tuple[str, ...],
+    robustness_symbols: tuple[str, ...],
+    auto_adjust_windows: bool,
+    max_candidates: int,
+    seed_robustness_top_k: int,
+):
+    return run_candidate_search(
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        history_provider=history_provider,
+        base_model_config=base_model_config,
+        base_strategy_config=base_strategy_config,
+        feature_packs=feature_packs,
+        state_counts=state_counts,
+        short_modes=short_modes,
+        confirmation_modes=confirmation_modes,
+        robustness_symbols=robustness_symbols,
+        auto_adjust_windows=auto_adjust_windows,
+        max_candidates=max_candidates,
+        seed_robustness_top_k=seed_robustness_top_k,
+    )
 
 st.markdown(
     """
@@ -147,6 +310,14 @@ def _engine_mode_label(option: str) -> str:
     return labels.get(option, option)
 
 
+def _run_profile_label(option: str) -> str:
+    labels = {
+        "core_signal": "core signal (fast, recommended)",
+        "full_research": "full research (slower diagnostics)",
+    }
+    return labels.get(option, option)
+
+
 def _apply_asset_aware_sidebar_defaults(feature_pack_options: list[str]) -> str:
     current_symbol = str(st.session_state.get("symbol_input", "BTCUSD") or "BTCUSD").upper()
     defaults = default_asset_settings(current_symbol)
@@ -188,6 +359,13 @@ engine_mode = st.sidebar.selectbox(
     format_func=_engine_mode_label,
     help=CONTROL_HELP["live_engine_mode"],
 )
+run_profile = st.sidebar.selectbox(
+    "Execution profile",
+    options=["core_signal", "full_research"],
+    index=0,
+    format_func=_run_profile_label,
+    help="Core signal mode runs only the selected state count and skips optional research diagnostics for speed. Full research mode honors the slower diagnostic toggles.",
+)
 auto_asset_defaults = st.sidebar.checkbox(
     "Auto asset-aware defaults",
     value=True,
@@ -211,6 +389,7 @@ st.sidebar.caption(default_basket_reason)
 with st.sidebar.form("controls"):
     st.subheader("Research Controls")
     st.caption("The sidebar now auto-detects crypto versus equities and reseeds interval, feature pack, costs, and robustness defaults when the symbol changes.")
+    st.caption(f"Execution profile: `{_run_profile_label(run_profile)}`")
     symbol = st.text_input("Symbol", key="symbol_input").upper()
     interval = st.selectbox("Interval", options=["4hour", "1day", "1hour"], help=CONTROL_HELP["interval"], key="interval_input")
     history_provider = st.selectbox(
@@ -254,9 +433,13 @@ with st.sidebar.form("controls"):
     slippage_bps = st.slider("Slippage estimate (bps)", min_value=0.0, max_value=30.0, step=0.5, help=CONTROL_HELP["slippage_bps"], key="slippage_bps_input")
     impact_bps = st.slider("Liquidity impact (bps)", min_value=0.0, max_value=20.0, step=0.5, help=CONTROL_HELP["impact_bps"], key="impact_bps_input")
     robustness_symbols = st.text_input("Robustness basket", key="robustness_symbols_input")
-    run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=True)
-    run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=True)
-    run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=True)
+    st.markdown("**Advanced Diagnostics**")
+    st.caption("These are the slower desk-style extras. Core signal mode skips them automatically unless the chosen engine or guardrails require consensus.")
+    run_model_comparison_check = st.checkbox("Run 5-9 state comparison", value=False)
+    run_robustness_check = st.checkbox("Run robustness basket", value=False)
+    run_timeframe_check = st.checkbox("Run timeframe comparison (4H / 1D / 1H)", value=False)
+    run_feature_pack_check = st.checkbox("Run feature-pack ablation", value=False)
+    run_consensus_check = st.checkbox("Run consensus diagnostics (nearby states + seeds)", value=False)
     run_candidate_search_check = st.checkbox("Run candidate search (feature pack / states / shorts / confirmation mode)", value=False)
     candidate_search_max = st.number_input("Candidate search max variants", min_value=4, max_value=80, value=4, step=4)
     auto_adjust_windows = st.checkbox("Auto-size windows if data is shorter than requested", value=True)
@@ -268,6 +451,7 @@ if refresh_live_quote:
     st.rerun()
 
 if run_clicked:
+    run_status = None
     try:
         with st.spinner("Fetching data, retraining walk-forward folds, and compiling diagnostics..."):
             data_config = DataConfig(symbol=symbol, interval=interval, limit=int(limit), provider=history_provider)
@@ -298,6 +482,18 @@ if run_clicked:
                 slippage_bps=slippage_bps,
                 impact_bps=impact_bps,
             )
+            plan = resolve_analysis_plan(
+                profile=run_profile,
+                selected_states=int(selected_states),
+                run_model_comparison=run_model_comparison_check,
+                run_robustness=run_robustness_check,
+                run_timeframe_comparison=run_timeframe_check,
+                run_feature_pack_comparison=run_feature_pack_check,
+                run_consensus_diagnostics=run_consensus_check,
+                run_candidate_search=run_candidate_search_check,
+                require_consensus_confirmation=strategy_config.require_consensus_confirmation,
+                engine_mode=engine_mode,
+            )
             effective_robustness_symbols = tuple(parse_symbol_list(robustness_symbols))
             default_run_basket, default_run_basket_reason = describe_robustness_basket(symbol, current_asset_class)
             robustness_basket_note = (
@@ -307,39 +503,72 @@ if run_clicked:
             )
             execution_strategy_config = strategy_config
             model_strategy_config = replace(strategy_config, require_daily_confirmation=False, require_consensus_confirmation=False)
-            fetched = fetch_price_data(data_config)
-            feature_frame = build_feature_frame(fetched.frame, feature_columns=feature_columns)
+            total_stages = 5
+            total_stages += 1 if data_config.interval == "4hour" and strategy_config.require_daily_confirmation else 0
+            total_stages += 1 if plan.run_robustness else 0
+            total_stages += 1 if plan.run_timeframe_comparison else 0
+            total_stages += 1 if plan.run_feature_pack_comparison else 0
+            total_stages += 1 if plan.run_consensus_diagnostics else 0
+            total_stages += 1 if plan.run_candidate_search else 0
+            run_status = st.status("Running analysis...", expanded=True)
+            progress_bar = st.progress(0.0, text="Preparing run...")
+            stage_state = {"completed": 0}
+            stage_timings: list[dict[str, float | str]] = []
+
+            def begin_stage(label: str) -> float:
+                progress_bar.progress(stage_state["completed"] / total_stages, text=label)
+                run_status.write(f"Running: {label}")
+                return perf_counter()
+
+            def finish_stage(label: str, started_at: float) -> None:
+                elapsed = perf_counter() - started_at
+                stage_timings.append({"stage": label, "seconds": round(elapsed, 2)})
+                stage_state["completed"] += 1
+                progress_bar.progress(
+                    min(stage_state["completed"] / total_stages, 1.0),
+                    text=f"Completed: {label} ({elapsed:.1f}s)",
+                )
+
+            started = begin_stage("Fetch historical data")
+            fetched = load_price_data_cached(data_config)
+            feature_frame = build_feature_frame_cached(fetched.frame, feature_columns=feature_columns)
+            finish_stage("Fetch historical data", started)
             walk_config, was_adjusted = (
                 suggest_walk_forward_config(len(feature_frame), requested_walk_config)
                 if auto_adjust_windows
                 else (requested_walk_config, False)
             )
-            comparison, results_by_state = compare_state_counts(
+            started = begin_stage("Run primary HMM walk-forward")
+            comparison, results_by_state = compare_state_counts_cached(
                 feature_frame=feature_frame,
                 feature_columns=feature_columns,
                 interval=data_config.interval,
                 model_config=model_config,
                 walk_config=walk_config,
                 strategy_config=model_strategy_config,
+                state_values=plan.state_values,
             )
+            finish_stage("Run primary HMM walk-forward", started)
             confirmation_fetched = None
             confirmation_result = None
             if data_config.interval == "4hour" and strategy_config.require_daily_confirmation:
+                started = begin_stage("Apply daily confirmation overlay")
                 confirmation_data_config = DataConfig(symbol=symbol, interval="1day", limit=int(limit), provider=history_provider)
-                confirmation_fetched = fetch_price_data(confirmation_data_config)
-                confirmation_feature_frame = build_feature_frame(confirmation_fetched.frame, feature_columns=feature_columns)
+                confirmation_fetched = load_price_data_cached(confirmation_data_config)
+                confirmation_feature_frame = build_feature_frame_cached(confirmation_fetched.frame, feature_columns=feature_columns)
                 confirmation_walk_config, _ = (
                     suggest_walk_forward_config(len(confirmation_feature_frame), default_walk_forward_config("1day", current_asset_class))
                     if auto_adjust_windows
                     else (default_walk_forward_config("1day", current_asset_class), False)
                 )
-                _, confirmation_results_by_state = compare_state_counts(
+                _, confirmation_results_by_state = compare_state_counts_cached(
                     feature_frame=confirmation_feature_frame,
                     feature_columns=feature_columns,
                     interval="1day",
                     model_config=model_config,
                     walk_config=confirmation_walk_config,
                     strategy_config=model_strategy_config,
+                    state_values=plan.state_values,
                 )
                 results_by_state = {
                     n_states: apply_higher_timeframe_confirmation(
@@ -353,8 +582,10 @@ if run_clicked:
                 }
                 comparison = summarize_state_count_results(results_by_state)
                 confirmation_result = confirmation_results_by_state[selected_states]
+                finish_stage("Apply daily confirmation overlay", started)
             raw_hmm_result = results_by_state[selected_states]
             selected_result = raw_hmm_result
+            started = begin_stage("Replay parameter sweep")
             sweep_results = parameter_sweep(
                 predictions=selected_result.predictions,
                 n_states=selected_states,
@@ -362,19 +593,26 @@ if run_clicked:
                 sweep_config=SweepConfig(),
                 interval=data_config.interval,
             )
-            robustness = run_multi_asset_robustness(
-                symbols=effective_robustness_symbols,
-                interval=data_config.interval,
-                limit=int(limit),
-                history_provider=history_provider,
-                feature_columns=feature_columns,
-                model_config=model_config,
-                walk_config=walk_config,
-                strategy_config=execution_strategy_config,
-                auto_adjust_windows=auto_adjust_windows,
-            )
-            timeframe_comparison = (
-                run_timeframe_comparison(
+            finish_stage("Replay parameter sweep", started)
+            if plan.run_robustness:
+                started = begin_stage("Run robustness basket")
+                robustness = run_multi_asset_robustness_cached(
+                    symbols=effective_robustness_symbols,
+                    interval=data_config.interval,
+                    limit=int(limit),
+                    history_provider=history_provider,
+                    feature_columns=feature_columns,
+                    model_config=model_config,
+                    walk_config=walk_config,
+                    strategy_config=execution_strategy_config,
+                    auto_adjust_windows=auto_adjust_windows,
+                )
+                finish_stage("Run robustness basket", started)
+            else:
+                robustness = pd.DataFrame()
+            if plan.run_timeframe_comparison:
+                started = begin_stage("Run timeframe comparison")
+                timeframe_comparison = run_timeframe_comparison_cached(
                     symbol=symbol,
                     limit=int(limit),
                     history_provider=history_provider,
@@ -384,11 +622,13 @@ if run_clicked:
                     feature_columns=feature_columns,
                     auto_adjust_windows=auto_adjust_windows,
                 )
-                if run_timeframe_check
-                else pd.DataFrame()
-            )
-            feature_pack_comparison = (
-                run_feature_pack_comparison(
+                finish_stage("Run timeframe comparison", started)
+            else:
+                timeframe_comparison = pd.DataFrame()
+
+            if plan.run_feature_pack_comparison:
+                started = begin_stage("Run feature-pack ablation")
+                feature_pack_comparison = run_feature_pack_comparison_cached(
                     price_frame=fetched.frame,
                     interval=data_config.interval,
                     model_config=model_config,
@@ -398,16 +638,13 @@ if run_clicked:
                     history_provider=history_provider,
                     auto_adjust_windows=auto_adjust_windows,
                 )
-                if run_feature_pack_check
-                else pd.DataFrame()
-            )
-            consensus_required = (
-                run_consensus_check
-                or strategy_config.require_consensus_confirmation
-                or engine_mode == "hmm_ensemble"
-            )
-            consensus = (
-                run_consensus_diagnostics(
+                finish_stage("Run feature-pack ablation", started)
+            else:
+                feature_pack_comparison = pd.DataFrame()
+
+            if plan.run_consensus_diagnostics:
+                started = begin_stage("Run consensus diagnostics")
+                consensus = run_consensus_diagnostics_cached(
                     symbol=symbol,
                     interval=data_config.interval,
                     limit=int(limit),
@@ -417,9 +654,9 @@ if run_clicked:
                     strategy_config=execution_strategy_config,
                     auto_adjust_windows=auto_adjust_windows,
                 )
-                if consensus_required
-                else None
-            )
+                finish_stage("Run consensus diagnostics", started)
+            else:
+                consensus = None
             ensemble_result = None
             if consensus is not None:
                 ensemble_strategy_config = replace(
@@ -450,6 +687,7 @@ if run_clicked:
                     interval=data_config.interval,
                     strategy_config=execution_strategy_config,
                 )
+            started = begin_stage("Evaluate nested holdout")
             nested_holdout = nested_holdout_evaluation(
                 predictions=selected_result.predictions,
                 n_states=selected_states,
@@ -458,8 +696,10 @@ if run_clicked:
                 outer_holdout_folds=1,
             )
             nested_holdout_table = nested_holdout_summary_frame(nested_holdout)
-            candidate_search_results = (
-                run_candidate_search(
+            finish_stage("Evaluate nested holdout", started)
+            if plan.run_candidate_search:
+                stage_started = begin_stage("Run candidate search")
+                candidate_search_results = run_candidate_search_cached(
                     symbol=symbol,
                     interval=data_config.interval,
                     limit=int(limit),
@@ -475,11 +715,12 @@ if run_clicked:
                     max_candidates=int(candidate_search_max),
                     seed_robustness_top_k=min(2, int(candidate_search_max)),
                 )
-                if run_candidate_search_check
-                else pd.DataFrame()
-            )
+                finish_stage("Run candidate search", stage_started)
+            else:
+                candidate_search_results = pd.DataFrame()
             candidate_search_summary = summarize_candidate_search(candidate_search_results)
             notes = build_research_notes(selected_result, comparison)
+            started = begin_stage("Write artifacts")
             artifact = write_run_artifact_bundle(
                 symbol=symbol,
                 resolved_symbol=fetched.resolved_symbol,
@@ -506,6 +747,8 @@ if run_clicked:
                 nested_holdout_summary=pd.DataFrame([nested_holdout]),
                 candidate_search_results=candidate_search_results,
             )
+            finish_stage("Write artifacts", started)
+            run_status.update(label="Analysis complete", state="complete")
             st.session_state["analysis"] = {
                 "data_url": fetched.source_url,
                 "data_provider": fetched.provider,
@@ -531,6 +774,8 @@ if run_clicked:
                 "confirmation_data_provider": confirmation_fetched.provider if confirmation_fetched is not None else "",
                 "robustness_symbols": effective_robustness_symbols,
                 "robustness_basket_note": robustness_basket_note,
+                "analysis_plan": plan,
+                "stage_timings": pd.DataFrame(stage_timings),
                 "notes": notes,
                 "symbol": symbol,
                 "resolved_symbol": fetched.resolved_symbol,
@@ -555,12 +800,21 @@ if run_clicked:
                 "artifact_manifest": str(artifact.manifest_path),
             }
     except ValueError as exc:
+        if run_status is not None:
+            run_status.update(label="Analysis failed", state="error")
         st.session_state.pop("analysis", None)
         st.error(str(exc))
         st.info(
             "Try a larger history, a higher timeframe like `4hour` or `1day`, or enable automatic window sizing. "
             "For crypto, prefer the `auto` historical provider so the app keeps FMP primary and only backfills deeper history when needed."
         )
+        st.stop()
+    except Exception as exc:  # pragma: no cover - UI safety net
+        if run_status is not None:
+            run_status.update(label="Analysis failed", state="error")
+        st.session_state.pop("analysis", None)
+        st.error(f"Unexpected analysis failure: {exc}")
+        st.info("Try `core signal` mode first. If it still fails, disable the slower diagnostics and rerun so we can isolate the step that is breaking.")
         st.stop()
 
 analysis = st.session_state.get("analysis")
@@ -720,6 +974,8 @@ else:
 candidate_search_results = analysis.get("candidate_search_results", pd.DataFrame())
 candidate_search_summary = analysis.get("candidate_search_summary", {})
 live_baseline_universe_note = describe_live_baseline_universe(analysis["asset_class"], analysis["interval"])
+analysis_plan = analysis.get("analysis_plan")
+stage_timings = analysis.get("stage_timings", pd.DataFrame())
 metric_lookup = metric_interpretation.set_index("metric")
 
 live_metric_items = [
@@ -1033,7 +1289,7 @@ with baselines_tab:
 
 with candidate_tab:
     if candidate_search_results.empty:
-        st.info("Candidate search was not run for this session. Enable it in the sidebar to rank feature pack, state count, shorting mode, and confirmation mode while keeping FMP primary and only backfilling deeper history when needed.")
+        st.info("Candidate search was not run for this session. Switch to `full research` and enable it in the sidebar when you want the slower leaderboard pass.")
     else:
         if candidate_search_summary.get("headline"):
             headline = str(candidate_search_summary["headline"])
@@ -1049,14 +1305,20 @@ with candidate_tab:
         st.caption("This search uses `auto` historical sourcing: FMP stays primary, Coinbase is used only as deep-history backfill when FMP intraday crypto history is too short, and Yahoo remains a last-resort fallback. It includes promotion gates, outer holdout, cross-asset robustness, and staged multi-seed HMM checks on the top variants, but it is still prioritized and capped rather than globally exhaustive.")
 
 with timeframe_tab:
-    st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
-    st.dataframe(timeframe_comparison, use_container_width=True)
-    st.caption("The timeframe comparison uses the same strategy controls but interval-specific walk-forward window presets across `4hour`, `1day`, and `1hour`. Treat it as a relative sanity check, not a perfect apples-to-apples scorecard.")
+    if timeframe_comparison.empty:
+        st.info("Timeframe comparison was skipped for speed on this run. Switch to `full research` and enable it when you want the slower cross-interval check.")
+    else:
+        st.plotly_chart(plot_timeframe_comparison(timeframe_comparison), use_container_width=True)
+        st.dataframe(timeframe_comparison, use_container_width=True)
+        st.caption("The timeframe comparison uses the same strategy controls but interval-specific walk-forward window presets across `4hour`, `1day`, and `1hour`. Treat it as a relative sanity check, not a perfect apples-to-apples scorecard.")
 
 with feature_tab:
-    st.plotly_chart(plot_feature_pack_comparison(feature_pack_comparison), use_container_width=True)
-    st.dataframe(feature_pack_comparison, use_container_width=True)
-    st.caption("Feature-pack ablation holds the timeframe and strategy controls fixed while changing what the HMM sees. This is the cleanest way to tell whether signal improvements are coming from better market representation or just tighter filters.")
+    if feature_pack_comparison.empty:
+        st.info("Feature-pack ablation was skipped for speed on this run. Switch to `full research` and enable it when you want the slower feature comparison.")
+    else:
+        st.plotly_chart(plot_feature_pack_comparison(feature_pack_comparison), use_container_width=True)
+        st.dataframe(feature_pack_comparison, use_container_width=True)
+        st.caption("Feature-pack ablation holds the timeframe and strategy controls fixed while changing what the HMM sees. This is the cleanest way to tell whether signal improvements are coming from better market representation or just tighter filters.")
 
 with interpretation_tab:
     st.subheader("Current Run Readout")
@@ -1078,6 +1340,11 @@ with methodology_tab:
                 "component": "Detected Asset Class",
                 "value": asset_class_label(str(analysis.get("asset_class", "crypto"))),
                 "interpretation": "The app now auto-detects crypto versus equities and adjusts annualization, walk-forward defaults, cost assumptions, and robustness suggestions accordingly.",
+            },
+            {
+                "component": "Execution Profile",
+                "value": _run_profile_label(getattr(analysis_plan, "profile", "core_signal")),
+                "interpretation": getattr(analysis_plan, "note", "This run used the default execution profile."),
             },
             {
                 "component": "Annualization Basis",
@@ -1190,6 +1457,12 @@ with methodology_tab:
     )
     st.subheader("Fold Schedule")
     st.dataframe(fold_schedule, use_container_width=True, hide_index=True)
+    st.subheader("Run Stages")
+    if stage_timings.empty:
+        st.info("No stage timing breakdown was recorded for this run.")
+    else:
+        st.dataframe(stage_timings, use_container_width=True, hide_index=True)
+        st.caption("This timing table shows where the app spent time, so it is easier to tell the difference between a healthy heavy run and a genuine hang.")
     if promotion_snapshot["severity"] == "success":
         st.success(promotion_snapshot["summary"])
     elif promotion_snapshot["severity"] == "error":
@@ -1262,6 +1535,8 @@ with consensus_tab:
         st.dataframe(consensus.members, use_container_width=True, hide_index=True)
 
 with model_tab:
+    if not getattr(analysis_plan, "run_model_comparison", False):
+        st.info("This run evaluated only the selected HMM state count for speed. Switch to `full research` and enable `Run 5-9 state comparison` to compare neighboring state counts.")
     st.plotly_chart(plot_model_comparison(comparison), use_container_width=True)
     st.dataframe(comparison, use_container_width=True)
 
@@ -1312,9 +1587,12 @@ with confidence_tab:
     st.dataframe(selected_result.fold_diagnostics, use_container_width=True)
 
 with robustness_tab:
-    st.plotly_chart(plot_robustness_results(robustness), use_container_width=True)
-    st.dataframe(robustness, use_container_width=True)
-    st.caption(str(analysis.get("robustness_basket_note", "Robustness checks rerun the same methodology across the selected basket.")))
+    if robustness.empty:
+        st.info("Robustness basket was skipped for speed on this run. Switch to `full research` and enable `Run robustness basket` to compute the cross-asset check.")
+    else:
+        st.plotly_chart(plot_robustness_results(robustness), use_container_width=True)
+        st.dataframe(robustness, use_container_width=True)
+        st.caption(str(analysis.get("robustness_basket_note", "Robustness checks rerun the same methodology across the selected basket.")))
 
 with notes_tab:
     st.subheader("Research Notes")

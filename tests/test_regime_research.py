@@ -77,6 +77,7 @@ from markov_regime.readiness import (
 )
 from markov_regime.reporting import export_signal_report
 from markov_regime.robustness import parse_symbol_list
+from markov_regime.runtime import resolve_analysis_plan
 from markov_regime.strategy import (
     apply_trading_rules,
     attach_state_action_columns,
@@ -943,6 +944,52 @@ def test_describe_live_baseline_universe_mentions_asset_class() -> None:
 
     assert "Live crypto baseline set" in crypto_note
     assert "Live equity baseline set" in equity_note
+
+
+def test_resolve_analysis_plan_core_signal_disables_heavy_diagnostics() -> None:
+    plan = resolve_analysis_plan(
+        profile="core_signal",
+        selected_states=8,
+        run_model_comparison=True,
+        run_robustness=True,
+        run_timeframe_comparison=True,
+        run_feature_pack_comparison=True,
+        run_consensus_diagnostics=True,
+        run_candidate_search=True,
+        require_consensus_confirmation=False,
+        engine_mode="auto",
+    )
+
+    assert plan.profile == "core_signal"
+    assert plan.state_values == (8,)
+    assert plan.run_model_comparison is False
+    assert plan.run_robustness is False
+    assert plan.run_timeframe_comparison is False
+    assert plan.run_feature_pack_comparison is False
+    assert plan.run_candidate_search is False
+
+
+def test_resolve_analysis_plan_full_research_honors_requested_diagnostics() -> None:
+    plan = resolve_analysis_plan(
+        profile="full_research",
+        selected_states=7,
+        run_model_comparison=True,
+        run_robustness=True,
+        run_timeframe_comparison=True,
+        run_feature_pack_comparison=False,
+        run_consensus_diagnostics=False,
+        run_candidate_search=True,
+        require_consensus_confirmation=False,
+        engine_mode="auto",
+    )
+
+    assert plan.profile == "full_research"
+    assert plan.state_values == (5, 6, 7, 8, 9)
+    assert plan.run_model_comparison is True
+    assert plan.run_robustness is True
+    assert plan.run_timeframe_comparison is True
+    assert plan.run_feature_pack_comparison is False
+    assert plan.run_candidate_search is True
 
 
 def test_compute_metrics_uses_equity_annualization_from_frame_metadata() -> None:
